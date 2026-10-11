@@ -31,7 +31,7 @@ if (ls.get("host-ok") !== CONFIG.HOST_PIN) {
     <span class="eyebrow">Panel del anfitrión</span><h1>Clave</h1>
     <form id="pf" class="row"><input id="pin" inputmode="numeric" placeholder="PIN"><button class="primary" style="width:100%">Entrar</button></form></div>`;
   $("#pf").onsubmit = (e) => { e.preventDefault(); if ($("#pin").value === CONFIG.HOST_PIN) { ls.set("host-ok", CONFIG.HOST_PIN); location.reload(); } else toast("PIN incorrecto"); };
-} else boot();
+} else setTimeout(boot, 0);   // arranca cuando todo el script ya cargó
 
 // ============ Datos ============
 async function setLive(game, phase, data) {
