@@ -65,7 +65,8 @@ async function boot() {
   await spotifyHandleRedirect();
   await loadAll();
   render();
-  listen(["scores", "matches", "buzzes", "song_answers", "trivia_votes", "costume_noms", "costume_ranks"], async (t, p) => {
+  listen(["scores", "matches", "buzzes", "song_answers", "trivia_votes", "costume_noms", "costume_ranks", "song_requests"], async (t, p) => {
+    if (t === "song_requests") return processRequests();
     if (t === "scores") H.scores = await q(db.from("scores").select("*").order("created_at", { ascending: false }));
     else if (t === "matches") H.matches = await q(db.from("matches").select("*").order("created_at"));
     else await loadGameData();
@@ -79,6 +80,50 @@ async function boot() {
     else renderSong();
   });
   setInterval(refreshNowPlaying, 5000);
+
+  // Respaldo: aunque falle la conexión en vivo, el panel revisa el buzzer cada segundo
+  let lastSig = "";
+  setInterval(async () => {
+    if (document.hidden || H.live.game !== "cancion") return;
+    const ph = H.live.phase;
+    if (ph !== "playing" && ph !== "answering") return;
+    try { await loadGameData(); } catch { return; }
+    if (ph === "playing") await onBuzz();
+    else {
+      const d = songData();
+      const a = H.answers.find((x) => x.attempt === d.attempt && x.player === d.player && !x.verdict);
+      if (a) await onAnswer(a);
+    }
+    const s = sig(H.buzzes.length, H.answers.length, H.live.phase);
+    if (s !== lastSig) { lastSig = s; renderSong(); }
+  }, 1000);
+  // Sin conexión en vivo: refresca votos y puntajes cada 3 s
+  setInterval(async () => {
+    if (document.hidden || window.RT_OK) return;
+    try {
+      H.scores = await q(db.from("scores").select("*").order("created_at", { ascending: false }));
+      H.matches = await q(db.from("matches").select("*").order("created_at"));
+      await loadGameData();
+    } catch { return; }
+    renderScores(); renderBeer(); renderHorse(); renderTriviaLive(); renderCostume();
+  }, 3000);
+
+  // Pedidos de canciones de los invitados: se revisan cada 2 s
+  processRequests();
+  setInterval(() => { if (!document.hidden) processRequests(); }, 2000);
+
+  // Pantalla siempre encendida mientras el panel está abierto
+  keepAwake();
+  document.addEventListener("visibilitychange", async () => {
+    if (document.hidden) return;
+    keepAwake();
+    try { await loadAll(); } catch {}
+    render();
+    if (H.live.game === "cancion" && H.live.phase === "playing") onBuzz();
+  });
+}
+async function keepAwake() {
+  try { if (navigator.wakeLock && !(H.wake && !H.wake.released)) H.wake = await navigator.wakeLock.request("screen"); } catch {}
 }
 
 // ============ Render general ============
@@ -96,6 +141,7 @@ function render() {
     <div class="grid-host">
       <div class="card" id="p-song"></div>
       <div class="card" id="p-queue"></div>
+      <div class="card" id="p-req"></div>
       <div class="card" id="p-trivia"></div>
       <div class="card" id="p-costume"></div>
       <div class="card" id="p-scores"></div>
@@ -109,7 +155,7 @@ function render() {
     if (k === "disfraz") return setLive("disfraz", "idle", { candidates: ls.get("costume-cands", {}) });
     setLive(k, "idle", {});
   });
-  renderMic(); renderSong(); renderQueue(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
+  renderMic(); renderSong(); renderQueue(); renderRequests(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
 }
 
 // ============ Spotify (PKCE, sin servidor) ============
@@ -555,6 +601,61 @@ function renderQueue() {
   $("#qf").onsubmit = (e) => { e.preventDefault(); H.qSearch = i.value; queueSearch(); };
   $("#qRef").onclick = queueLoad;
   el.querySelectorAll("[data-add]").forEach((b) => b.onclick = () => { b.disabled = true; queueAdd(b.dataset.add, b.dataset.title); });
+}
+
+// ============ Pedidos de los invitados ============
+// Los jugadores no tienen Spotify: escriben en song_requests y este panel busca y agrega a la cola.
+// Estados: searching → results → requested → queued | waiting (concurso) | rejected
+H.requests = []; H.reqBusy = false; H.reqSig = "";
+const contestActive = () => !!ls.get("bg-resume", null) || (H.live.game === "cancion" && ["playing", "answering", "judging", "result"].includes(H.live.phase));
+async function processRequests() {
+  if (H.reqBusy || !ls.get("sp-token", null)) return;
+  H.reqBusy = true;
+  try {
+    const all = await q(db.from("song_requests").select("*").order("id"));
+    H.requests = all.slice(-80);
+    const fresh = (r) => Date.now() - new Date(r.created_at).getTime() < 10 * 60 * 1000;
+    for (const r of H.requests.filter((x) => x.status === "searching" && fresh(x))) {
+      try {
+        const res = await sp("GET", "/search?type=track&limit=6&q=" + encodeURIComponent(r.query));
+        await q(db.from("song_requests").update({ status: "results", results: (res?.tracks?.items || []).map(trackRow) }).eq("id", r.id));
+      } catch { await q(db.from("song_requests").update({ status: "error" }).eq("id", r.id)); }
+    }
+    const auto = ls.get("req-auto", true), busy = contestActive();
+    for (const r of H.requests.filter((x) => x.status === "requested" || x.status === "waiting")) {
+      if (busy) { if (r.status !== "waiting") await q(db.from("song_requests").update({ status: "waiting" }).eq("id", r.id)); continue; }
+      if (auto) await queueRequest(r, true);
+    }
+    H.requests = (await q(db.from("song_requests").select("*").order("id"))).slice(-80);
+  } catch {}
+  H.reqBusy = false;
+  const s = sig(H.requests.map((r) => r.id + r.status), contestActive());
+  if (s !== H.reqSig) { H.reqSig = s; renderRequests(); }
+}
+async function queueRequest(r, quiet) {
+  try {
+    await sp("POST", "/me/player/queue?uri=" + encodeURIComponent(r.chosen.uri));
+    await q(db.from("song_requests").update({ status: "queued" }).eq("id", r.id));
+    if (!quiet) toast("En la cola: " + r.chosen.title);
+  } catch (e) { if (!quiet) toast(e.message); }
+}
+function renderRequests() {
+  const el = $("#p-req"); if (!el) return;
+  const auto = ls.get("req-auto", true);
+  const waiting = H.requests.filter((r) => ["requested", "waiting"].includes(r.status) && r.chosen);
+  const done = H.requests.filter((r) => r.status === "queued").slice(-6).reverse();
+  const line = (r, actions) => `<li class="trk"><span class="t"><strong>${esc(r.chosen.title)}</strong><span class="small muted">${esc(r.chosen.artist)} · ${esc(r.player)}</span></span>${actions}</li>`;
+  el.innerHTML = `<h2>Pedidos de invitados</h2>
+    <label style="flex-direction:row;align-items:center;gap:8px;color:var(--fg)"><input type="checkbox" id="rAuto" ${auto ? "checked" : ""}> Agregar a la cola automáticamente</label>
+    ${!ls.get("sp-token", null) ? `<p class="small muted">Conecta Spotify para atender los pedidos.</p>` : ""}
+    ${contestActive() ? `<p class="small">Hay concurso: los pedidos esperan y entran al volver a la música.</p>` : ""}
+    <h3>Esperando (${waiting.length})</h3>
+    ${waiting.length ? `<ul class="list">${waiting.map((r) => line(r, `<button class="small" data-rno="${r.id}">✗</button><button class="small primary" data-rok="${r.id}">✓</button>`)).join("")}</ul>` : `<p class="small muted">Nada pendiente.</p>`}
+    <h3>Ya en la cola</h3>
+    ${done.length ? `<ul class="list">${done.map((r) => line(r, "")).join("")}</ul>` : `<p class="small muted">Aún no hay.</p>`}`;
+  $("#rAuto").onchange = (e) => { ls.set("req-auto", e.target.checked); processRequests(); };
+  el.querySelectorAll("[data-rok]").forEach((b) => b.onclick = async () => { b.disabled = true; await queueRequest(H.requests.find((r) => r.id == b.dataset.rok)); H.reqSig = ""; processRequests(); });
+  el.querySelectorAll("[data-rno]").forEach((b) => b.onclick = async () => { b.disabled = true; await q(db.from("song_requests").update({ status: "rejected" }).eq("id", b.dataset.rno)); H.reqSig = ""; processRequests(); });
 }
 
 // ============ Trivia ============

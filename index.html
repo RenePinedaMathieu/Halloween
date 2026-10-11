@@ -19,6 +19,7 @@ const S = {
   scores: [], buzzes: [], answers: [], votes: [], noms: [], ranks: [], matches: [],
   tab: "resultados", search: "", pending: null,
   answerTimer: null, answerKey: null, answered: {}, draftRanks: {},
+  requests: [], reqQuery: "", reqId: null,
 };
 try { S.me = JSON.parse(localStorage.getItem("halloween-me")); } catch {}
 
@@ -28,6 +29,10 @@ const app = $("#app");
 async function loadPlayers() { S.players = await q(db.from("players").select("*").order("name")); }
 async function loadLive() { S.live = (await q(db.from("live_state").select("*").eq("id", 1)))[0] || S.live; }
 async function loadScores() { S.scores = await q(db.from("scores").select("*")); }
+async function loadRequests() {
+  const all = await q(db.from("song_requests").select("*").order("id"));
+  S.requests = all.slice(-60);
+}
 async function loadMatches() { S.matches = await q(db.from("matches").select("*").order("created_at")); }
 async function loadRoundData() {
   const d = S.live.data || {};
@@ -43,7 +48,7 @@ async function loadRoundData() {
 }
 
 async function init() {
-  await Promise.all([loadPlayers(), loadLive(), loadScores(), loadMatches()]);
+  await Promise.all([loadPlayers(), loadLive(), loadScores(), loadMatches(), loadRequests().catch(() => {})]);
   if (S.me) {
     const p = S.players.find((x) => x.name === S.me.name);
     S.me = p ? { name: p.name, team: p.team } : null;   // por si cambiaron de equipo
@@ -51,7 +56,7 @@ async function init() {
   await loadRoundData();
   S.tab = tabForGame(S.live.game);
   render();
-  listen(["live_state", "scores", "buzzes", "song_answers", "trivia_votes", "costume_noms", "costume_ranks", "matches"], async (t) => {
+  const handle = async (t) => {
     if (t === "live_state") {
       const prev = S.live.game;
       await loadLive(); await loadRoundData();
@@ -61,9 +66,28 @@ async function init() {
     }
     else if (t === "scores") await loadScores();
     else if (t === "matches") await loadMatches();
+    else if (t === "song_requests") await loadRequests();
     else await loadRoundData();
     if (S.me) render();   // en el selector de nombre no se redibuja para no cortar la búsqueda
-  });
+  };
+  listen(["live_state", "scores", "buzzes", "song_answers", "trivia_votes", "costume_noms", "costume_ranks", "matches", "song_requests"], handle);
+
+  // Respaldo: revisa el estado del juego cada 2 s (cada 8 s si la conexión en vivo funciona)
+  let tick = 0, lastSig = "";
+  setInterval(async () => {
+    tick++;
+    if (document.hidden || (window.RT_OK && tick % 4)) return;
+    try {
+      const live = (await q(db.from("live_state").select("*").eq("id", 1)))[0];
+      if (live && sig(live.game, live.phase, live.data) !== sig(S.live.game, S.live.phase, S.live.data)) { await handle("live_state"); lastSig = ""; return; }
+      if (window.RT_OK) return;
+      await Promise.all([loadScores(), loadMatches(), loadRoundData(), loadRequests().catch(() => {})]);
+      const s = sig(S.scores.length, S.matches.length, S.buzzes.length, S.answers.length, S.votes.map((v) => v.option + v.player), S.noms.length, S.ranks.length, S.requests.map((r) => r.id + r.status));
+      if (s !== lastSig) { lastSig = s; if (S.me) render(); }
+    } catch {}
+  }, 2000);
+  // Al volver a la app después de bloquear el celular, se pone al día
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) handle("live_state"); });
 }
 
 // ---------- Render ----------
@@ -81,6 +105,7 @@ function render() {
   applyTeamColor();
   if (!S.me) return renderPicker();
   const t = S.me.team;
+  const focus = document.activeElement?.id, selPos = document.activeElement?.selectionStart;
   app.innerHTML = `
     <div class="card me" style="--c:${TEAMS[t].color}">
       <div class="who"><span class="eyebrow">Halloween · ${TEAMS[t].name}</span><strong>${esc(S.me.name)}</strong></div>
@@ -101,10 +126,14 @@ function render() {
   else if (S.tab === "cancion") renderSong(body);
   else if (S.tab === "trivia") renderTrivia(body);
   else if (S.tab === "disfraz") renderCostume(body);
+  else if (S.tab === "musica") renderMusic(body);
   else body.innerHTML = renderResults();
+  // devuelve el foco al campo que estabas escribiendo
+  const f = focus && document.getElementById(focus);
+  if (f && f.tagName === "INPUT" && !f.disabled) { f.focus(); try { f.setSelectionRange(selPos, selPos); } catch {} }
 }
 
-const TABS = [["cancion", "Canción"], ["trivia", "Trivia"], ["disfraz", "Disfraz"], ["resultados", "Tabla"], ["equipo", "Equipo"]];
+const TABS = [["cancion", "Canción"], ["trivia", "Trivia"], ["disfraz", "Disfraz"], ["musica", "Música"], ["resultados", "Tabla"], ["equipo", "Equipo"]];
 // Pestaña que corresponde al juego en vivo
 function tabForGame(g) { return ["cancion", "trivia", "disfraz"].includes(g) ? g : "resultados"; }
 
@@ -174,6 +203,48 @@ function renderResults() {
     <div class="card"><h3>Trivia</h3>${triviaHistory()}</div>
     <div class="card"><h3>Mejor disfraz</h3>${cost ? costumeTable(cost.data.results, cost.data.candidates) : `<p class="muted small">Todavía no se vota.</p>`}</div>
     <div class="card"><h3>Carrera de caballos</h3>${horse.length ? `<ul class="list">${horse.map((m, i) => `<li><span>Carrera ${i + 1}</span><span>${m.data.order.map((t, j) => `${j + 1}º ${teamChip(t)}`).join(" ")}</span></li>`).join("")}</ul>` : `<p class="muted small">Aún no hay carreras.</p>`}</div>`;
+}
+
+// ---------- Música: pedir canciones (el iPad del anfitrión busca en Spotify y las agrega a la cola) ----------
+const MAX_PENDING = 3;
+const REQ_LABEL = { searching: "Buscando…", results: "Elige una", requested: "Pedida", waiting: "Después del concurso", queued: "En la cola ✓", rejected: "No entró", error: "Error" };
+function renderMusic(body) {
+  const mine = S.requests.filter((r) => r.player === S.me.name);
+  const cur = S.reqId ? S.requests.find((r) => r.id === S.reqId) : null;
+  const pending = mine.filter((r) => ["requested", "waiting"].includes(r.status)).length;
+  const contest = S.live.game === "cancion" && ["playing", "answering", "judging", "result"].includes(S.live.phase);
+  const row = (t, i) => `<li class="trk">${t.img ? `<img src="${esc(t.img)}" alt="">` : ""}<span class="t"><strong>${esc(t.title)}</strong><span class="small muted">${esc(t.artist)}</span></span>
+    <button class="small primary" data-pick="${i}" ${pending >= MAX_PENDING ? "disabled" : ""}>Pedir</button></li>`;
+  const recent = S.requests.filter((r) => r.status === "queued").slice(-8).reverse();
+  body.innerHTML = `
+    <div class="card"><span class="eyebrow">Música</span><h2>Pide una canción</h2>
+      ${contest ? `<p class="small muted">Hay concurso en curso: lo que pidas suena cuando termine.</p>` : `<p class="small muted">Busca y toca "Pedir". Se agrega a la cola del parlante.</p>`}
+      <form id="rf" class="row" style="flex-wrap:nowrap"><input id="rq" placeholder="Canción o artista" value="${esc(S.reqQuery)}" autocomplete="off">
+        <button class="primary" ${cur?.status === "searching" ? "disabled" : ""}>${cur?.status === "searching" ? "…" : "Buscar"}</button></form>
+      ${cur?.status === "searching" ? `<p class="small muted">Buscando en Spotify…</p>` : ""}
+      ${cur?.status === "error" ? `<p class="small" style="color:var(--bad)">No se pudo buscar ahora. Intenta de nuevo en un rato.</p>` : ""}
+      ${cur?.status === "results" ? (cur.results?.length ? `<ul class="list">${cur.results.map(row).join("")}</ul>` : `<p class="small muted">No encontré nada con eso.</p>`) : ""}
+      ${pending >= MAX_PENDING ? `<p class="small muted">Tienes ${MAX_PENDING} canciones esperando. Pide otra cuando suenen.</p>` : ""}
+    </div>
+    ${mine.filter((r) => r.chosen).length ? `<div class="card"><h3>Mis pedidos</h3><ul class="list">${mine.filter((r) => r.chosen).slice(-5).reverse().map((r) =>
+      `<li><span class="t" style="min-width:0"><strong>${esc(r.chosen.title)}</strong><br><span class="small muted">${esc(r.chosen.artist)}</span></span><span class="small">${REQ_LABEL[r.status] || r.status}</span></li>`).join("")}</ul></div>` : ""}
+    <div class="card"><h3>Lo que pidió la gente</h3>${recent.length ? `<ul class="list">${recent.map((r) =>
+      `<li><span class="t" style="min-width:0"><strong>${esc(r.chosen.title)}</strong><br><span class="small muted">${esc(r.chosen.artist)}</span></span>${teamChip(r.team)}<span class="small muted">${esc(r.player)}</span></li>`).join("")}</ul>` : `<p class="small muted">Todavía nadie pide canciones.</p>`}</div>`;
+  const i = $("#rq"); i.oninput = () => { S.reqQuery = i.value; };
+  $("#rf").onsubmit = async (e) => {
+    e.preventDefault();
+    const term = i.value.trim(); if (!term) return;
+    S.reqQuery = term;
+    const r = await q(db.from("song_requests").insert({ player: S.me.name, team: S.me.team, query: term, status: "searching" }).select());
+    S.reqId = r[0]?.id; await loadRequests(); render();
+  };
+  body.querySelectorAll("[data-pick]").forEach((b) => b.onclick = async () => {
+    const t = cur.results[Number(b.dataset.pick)];
+    b.disabled = true;
+    await q(db.from("song_requests").update({ chosen: t, status: "requested" }).eq("id", cur.id));
+    S.reqId = null; S.reqQuery = ""; toast("Pedida: " + t.title);
+    await loadRequests(); render();
+  });
 }
 
 // ---------- Adivina la canción ----------
