@@ -1,7 +1,7 @@
 // ====== CONFIGURA ESTO ======
 const CONFIG = {
-  SUPABASE_URL: "https://TU-PROYECTO.supabase.co",
-  SUPABASE_ANON_KEY: "TU_ANON_KEY",
+  SUPABASE_URL: "https://gtpamfivoajjavktmpew.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_b-Ka2xJleSBXRBh1ecNoQw_IyAJwfx_",
   SPOTIFY_CLIENT_ID: "TU_SPOTIFY_CLIENT_ID",
   HOST_PIN: "1234",          // clave del panel del anfitrión
   TRIVIA_HOST: "Rene",       // quien hace las preguntas de trivia (no vota)
