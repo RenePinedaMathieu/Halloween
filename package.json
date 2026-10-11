@@ -1,0 +1,6 @@
+{
+  "name": "halloween-juegos",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" }
+}

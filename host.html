@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Halloween · Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=Figtree:wght@400;600;700;800&display=swap">
+<link rel="stylesheet" href="app.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="shared.js"></script>
+</head>
+<body>
+<div class="wrap wide" id="app"></div>
+
+<script>
+const H = {
+  players: [], live: { game: "none", phase: "idle", data: {} }, scores: [], matches: [],
+  buzzes: [], answers: [], votes: [], noms: [], ranks: [],
+  track: null, showTitle: false, handling: false, answerTimeout: null, lastSongScoreId: null,
+  spotify: null,
+};
+const app = $("#app");
+const L = "ABCDEF";
+const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+             set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+
+// ============ PIN ============
+if (ls.get("host-ok") !== CONFIG.HOST_PIN) {
+  app.innerHTML = `<div class="card" style="max-width:360px;margin:40px auto">
+    <span class="eyebrow">Panel del anfitrión</span><h1>Clave</h1>
+    <form id="pf" class="row"><input id="pin" inputmode="numeric" placeholder="PIN"><button class="primary" style="width:100%">Entrar</button></form></div>`;
+  $("#pf").onsubmit = (e) => { e.preventDefault(); if ($("#pin").value === CONFIG.HOST_PIN) { ls.set("host-ok", CONFIG.HOST_PIN); location.reload(); } else toast("PIN incorrecto"); };
+} else boot();
+
+// ============ Datos ============
+async function setLive(game, phase, data) {
+  H.live = { id: 1, game, phase, data, updated_at: new Date().toISOString() };
+  await q(db.from("live_state").upsert(H.live));
+  render();
+}
+async function loadAll() {
+  [H.players, H.scores, H.matches] = await Promise.all([
+    q(db.from("players").select("*").order("name")),
+    q(db.from("scores").select("*").order("created_at", { ascending: false })),
+    q(db.from("matches").select("*").order("created_at")),
+  ]);
+  H.live = (await q(db.from("live_state").select("*").eq("id", 1)))[0] || H.live;
+  await loadGameData();
+}
+async function loadGameData() {
+  const d = H.live.data || {};
+  if (H.live.game === "cancion" && d.round) {
+    H.buzzes = await q(db.from("buzzes").select("*").eq("round", d.round).order("id"));
+    H.answers = await q(db.from("song_answers").select("*").eq("round", d.round).order("id"));
+  }
+  if (H.live.game === "trivia" && d.qid) H.votes = await q(db.from("trivia_votes").select("*").eq("question_id", d.qid));
+  if (H.live.game === "disfraz") {
+    H.noms = await q(db.from("costume_noms").select("*"));
+    H.ranks = await q(db.from("costume_ranks").select("*"));
+  }
+}
+
+async function boot() {
+  await spotifyHandleRedirect();
+  await loadAll();
+  render();
+  listen(["scores", "matches", "buzzes", "song_answers", "trivia_votes", "costume_noms", "costume_ranks"], async (t, p) => {
+    if (t === "scores") H.scores = await q(db.from("scores").select("*").order("created_at", { ascending: false }));
+    else if (t === "matches") H.matches = await q(db.from("matches").select("*").order("created_at"));
+    else await loadGameData();
+    if (t === "buzzes") await onBuzz();
+    if (t === "song_answers" && p.eventType === "INSERT") await onAnswer(p.new);
+    // Solo se redibuja el panel afectado, para no interrumpir lo que estés escribiendo
+    if (t === "scores") renderScores();
+    else if (t === "matches") { renderBeer(); renderHorse(); }
+    else if (t === "trivia_votes") renderTriviaLive();
+    else if (t.startsWith("costume")) renderCostume();
+    else renderSong();
+  });
+  setInterval(refreshNowPlaying, 5000);
+}
+
+// ============ Render general ============
+function render() {
+  const g = H.live.game;
+  app.innerHTML = `
+    <div class="row" style="justify-content:space-between">
+      <div><span class="eyebrow">Panel del anfitrión</span><h1>Halloween</h1></div>
+      <a class="small muted" href="index.html" target="_blank">Abrir vista de jugadores ↗</a>
+    </div>
+    <div class="card"><h3>En los celulares ahora</h3>
+      <div class="row">${[["none", "Nada"], ...Object.entries(GAMES).filter(([k]) => k !== "extra")]
+        .map(([k, l]) => `<button data-game="${k}" class="${g === k ? "sel" : ""}">${l}</button>`).join("")}</div></div>
+    <div class="card" id="p-mic"></div>
+    <div class="grid-host">
+      <div class="card" id="p-song"></div>
+      <div class="card" id="p-trivia"></div>
+      <div class="card" id="p-costume"></div>
+      <div class="card" id="p-scores"></div>
+      <div class="card" id="p-beer"></div>
+      <div class="card" id="p-horse"></div>
+    </div>`;
+  app.querySelectorAll("[data-game]").forEach((b) => b.onclick = () => {
+    const k = b.dataset.game;
+    if (k === H.live.game) return;
+    if (k === "cancion") return setLive("cancion", "waiting", { round: ls.get("song-round", 0), total: ls.get("song-total", 10), attempt: 1, locked: [] });
+    if (k === "disfraz") return setLive("disfraz", "idle", { candidates: ls.get("costume-cands", {}) });
+    setLive(k, "idle", {});
+  });
+  renderMic(); renderSong(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
+}
+
+// ============ Spotify (PKCE, sin servidor) ============
+const SP_SCOPES = "user-read-playback-state user-modify-playback-state user-read-currently-playing";
+const redirectUri = () => location.origin + location.pathname;
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+async function spotifyConnect() {
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  ls.set("sp-verifier", verifier);
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  const u = new URL("https://accounts.spotify.com/authorize");
+  Object.entries({ response_type: "code", client_id: CONFIG.SPOTIFY_CLIENT_ID, scope: SP_SCOPES, code_challenge_method: "S256", code_challenge: challenge, redirect_uri: redirectUri() })
+    .forEach(([k, v]) => u.searchParams.set(k, v));
+  location.href = u.toString();
+}
+async function spotifyToken(params) {
+  const r = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: CONFIG.SPOTIFY_CLIENT_ID, ...params }),
+  });
+  if (!r.ok) throw new Error("Spotify: " + (await r.text()));
+  const t = await r.json();
+  const prev = ls.get("sp-token", {});
+  const tok = { access: t.access_token, refresh: t.refresh_token || prev.refresh, exp: Date.now() + (t.expires_in - 60) * 1000 };
+  ls.set("sp-token", tok);
+  return tok;
+}
+async function spotifyHandleRedirect() {
+  const p = new URLSearchParams(location.search);
+  if (p.get("code")) {
+    try { await spotifyToken({ grant_type: "authorization_code", code: p.get("code"), redirect_uri: redirectUri(), code_verifier: ls.get("sp-verifier", "") }); toast("Spotify conectado"); }
+    catch (e) { toast(e.message); }
+    history.replaceState(null, "", location.pathname);
+  }
+}
+async function sp(method, path, body) {
+  let tok = ls.get("sp-token", null);
+  if (!tok) throw new Error("Conecta Spotify primero");
+  if (Date.now() > tok.exp) tok = await spotifyToken({ grant_type: "refresh_token", refresh_token: tok.refresh });
+  const r = await fetch("https://api.spotify.com/v1" + path, { method, headers: { Authorization: "Bearer " + tok.access, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  if (r.status === 204 || r.status === 202) return null;
+  if (!r.ok) {
+    const txt = await r.text();
+    if (r.status === 404) throw new Error("Spotify no encuentra un dispositivo activo. Abre Spotify y pon a sonar algo.");
+    throw new Error("Spotify " + r.status + ": " + txt.slice(0, 120));
+  }
+  const ct = r.headers.get("content-type") || "";
+  return ct.includes("json") ? r.json() : null;
+}
+async function refreshNowPlaying() {
+  if (!ls.get("sp-token", null)) return;
+  try {
+    const d = await sp("GET", "/me/player/currently-playing");
+    const t = d?.item ? { title: d.item.name, artist: d.item.artists.map((a) => a.name).join(", "), playing: d.is_playing } : null;
+    const changed = JSON.stringify(t) !== JSON.stringify(H.spotify);
+    H.spotify = t;
+    if (changed) renderSong();
+  } catch (e) { /* silencioso */ }
+}
+const spPlay = () => sp("PUT", "/me/player/play").catch((e) => toast(e.message));
+const spPause = () => sp("PUT", "/me/player/pause").catch((e) => toast(e.message));
+async function spNext() { try { await sp("POST", "/me/player/next"); await new Promise((r) => setTimeout(r, 700)); } catch (e) { toast(e.message); } }
+
+// ============ Micrófono para avisos ============
+// Tu voz sale por el parlante conectado a este celular. Al hablar, Spotify se pausa y vuelve al terminar.
+H.mic = { on: false, stream: null, ctx: null, gain: null, wasPlaying: false, vol: ls.get("mic-vol", 1.5) };
+
+async function micStart() {
+  if (H.mic.on) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    H.mic.wasPlaying = !!H.spotify?.playing;
+    if (H.mic.wasPlaying) await spPause();
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    await ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    const gain = ctx.createGain(); gain.gain.value = H.mic.vol;
+    const comp = ctx.createDynamicsCompressor();   // evita que los gritos saturen
+    src.connect(gain).connect(comp).connect(ctx.destination);
+    Object.assign(H.mic, { on: true, stream, ctx, gain });
+  } catch (e) {
+    toast(e?.name === "NotAllowedError" ? "Da permiso al micrófono en el navegador" : "No se pudo abrir el micrófono");
+  }
+  renderMic();
+}
+async function micStop() {
+  if (!H.mic.on) return;
+  H.mic.stream?.getTracks().forEach((t) => t.stop());
+  try { await H.mic.ctx?.close(); } catch {}
+  const resume = H.mic.wasPlaying;
+  Object.assign(H.mic, { on: false, stream: null, ctx: null, gain: null, wasPlaying: false });
+  renderMic();
+  if (resume) spPlay();
+}
+function renderMic() {
+  const el = $("#p-mic"); if (!el) return;
+  const m = H.mic;
+  el.innerHTML = `<div class="row" style="justify-content:space-between;align-items:center">
+      <div><h2>Micrófono</h2><p class="small muted">Habla por el parlante. La música se pausa mientras hablas.</p></div>
+      <button id="micBtn" class="${m.on ? "danger" : "primary"}" style="min-width:150px">${m.on ? "■ Terminar" : "🎤 Hablar"}</button>
+    </div>
+    <label>Volumen de la voz<input id="micVol" type="range" min="0.5" max="4" step="0.1" value="${m.vol}"></label>
+    ${m.on ? `<p class="small"><strong style="color:var(--bad)">● Al aire.</strong> Aléjate del parlante si se escucha un pitido.</p>` : ""}`;
+  $("#micBtn").onclick = () => (H.mic.on ? micStop() : micStart());
+  $("#micVol").oninput = (e) => { H.mic.vol = Number(e.target.value); ls.set("mic-vol", H.mic.vol); if (H.mic.gain) H.mic.gain.gain.value = H.mic.vol; };
+}
+
+// ============ Adivina la canción ============
+function songData() { return { round: 0, total: 10, attempt: 1, locked: [], ...(H.live.data || {}) }; }
+
+async function openSong(next) {
+  if (next) await spNext();
+  await refreshNowPlaying();
+  if (!H.spotify) return toast("No hay canción sonando en Spotify");
+  H.track = { title: H.spotify.title, artist: H.spotify.artist };
+  const d = songData();
+  const round = d.round + 1; ls.set("song-round", round);
+  H.handling = false; H.lastSongScoreId = null; H.buzzes = []; H.answers = [];
+  await spPlay();
+  await setLive("cancion", "playing", { round, total: d.total, attempt: 1, locked: [] });
+}
+async function reopenSong() {
+  const d = songData();
+  H.handling = false;
+  await spPlay();
+  await setLive("cancion", "playing", { ...d, attempt: d.attempt + 1, team: null, player: null, result: null });
+}
+async function onBuzz() {
+  if (H.live.game !== "cancion" || H.live.phase !== "playing" || H.handling) return;
+  const d = songData();
+  const first = H.buzzes.find((b) => b.attempt === d.attempt && !d.locked.includes(b.team));
+  if (!first) return;
+  H.handling = true;
+  await spPause();
+  await setLive("cancion", "answering", { ...d, team: first.team, player: first.player });
+  clearTimeout(H.answerTimeout);
+  H.answerTimeout = setTimeout(async () => {
+    const cur = songData();
+    if (H.live.phase === "answering" && cur.attempt === d.attempt) {
+      await finishWrong(cur, { ok: false, timeout: true, team: cur.team, reason: "No alcanzó a escribir." });
+    }
+  }, (CONFIG.ANSWER_SECONDS + 3) * 1000);
+}
+async function onAnswer(a) {
+  const d = songData();
+  if (H.live.phase !== "answering" || a.round !== d.round || a.attempt !== d.attempt || a.player !== d.player) return;
+  clearTimeout(H.answerTimeout);
+  await setLive("cancion", "judging", d);
+  const track = H.track || { title: H.spotify?.title, artist: H.spotify?.artist };
+  let ok = false, reason = "";
+  try {
+    const r = await fetch("/api/judge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: track.title, artist: track.artist, answer: a.answer }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    ok = j.match; reason = j.reason;
+  } catch (e) {
+    ok = fuzzyMatch(track.title, a.answer);
+    reason = "Revisión automática sin IA (" + (e.message || e) + ")";
+  }
+  await q(db.from("song_answers").update({ verdict: ok ? "ok" : "no", reason }).eq("id", a.id));
+  if (ok) {
+    const s = await q(db.from("scores").insert({ team: a.team, game: "cancion", points: CONFIG.SONG_POINTS, note: `Canción ${d.round}: ${track.title}` }).select());
+    H.lastSongScoreId = s[0]?.id;
+    const m = await q(db.from("matches").insert({ game: "cancion", data: { round: d.round, title: track.title, artist: track.artist, team: a.team } }).select());
+    H.lastSongMatchId = m[0]?.id;
+  }
+  if (ok) await setLive("cancion", "result", { ...d, result: { ok, team: a.team, answer: a.answer, reason, title: track.title, artist: track.artist } });
+  else await finishWrong(d, { ok: false, team: a.team, answer: a.answer, reason });
+}
+
+// Respuesta mala o sin respuesta: se bloquea al equipo y la canción sigue sola.
+// Si ya fallaron los 4 equipos, se revela la canción.
+async function finishWrong(d, result) {
+  const locked = [...new Set([...d.locked, result.team])];
+  const track = H.track || { title: H.spotify?.title, artist: H.spotify?.artist };
+  if (locked.length >= 4) {
+    return setLive("cancion", "result", { ...d, locked, result: { ...result, ended: true, title: track.title, artist: track.artist } });
+  }
+  await setLive("cancion", "result", { ...d, locked, result });
+  const attempt = d.attempt;
+  clearTimeout(H.autoResume);
+  H.autoResume = setTimeout(() => {
+    const cur = songData();
+    if (H.live.game === "cancion" && H.live.phase === "result" && cur.attempt === attempt && cur.result && !cur.result.ok) reopenSong();
+  }, CONFIG.RESUME_SECONDS * 1000);
+}
+async function overrideSong(makeOk) {
+  const d = songData(), r = d.result; if (!r) return;
+  const track = H.track || {};
+  clearTimeout(H.autoResume);
+  if (makeOk && !r.ok) {
+    const s = await q(db.from("scores").insert({ team: r.team, game: "cancion", points: CONFIG.SONG_POINTS, note: `Canción ${d.round}: ${track.title} (corregido)` }).select());
+    H.lastSongScoreId = s[0]?.id;
+    const m = await q(db.from("matches").insert({ game: "cancion", data: { round: d.round, title: track.title, artist: track.artist, team: r.team } }).select());
+    H.lastSongMatchId = m[0]?.id;
+    await setLive("cancion", "result", { ...d, locked: d.locked.filter((t) => t !== r.team), result: { ...r, ok: true, timeout: false, title: track.title, artist: track.artist } });
+  } else if (!makeOk && r.ok) {
+    if (H.lastSongScoreId) await q(db.from("scores").delete().eq("id", H.lastSongScoreId));
+    H.lastSongScoreId = null;
+    if (H.lastSongMatchId) await q(db.from("matches").delete().eq("id", H.lastSongMatchId));
+    H.lastSongMatchId = null;
+    await setLive("cancion", "result", { ...d, locked: [...d.locked, r.team], result: { ...r, ok: false, title: null } });
+  }
+}
+
+function renderSong() {
+  const el = $("#p-song"); if (!el) return;
+  const d = songData(), ph = H.live.game === "cancion" ? H.live.phase : "off";
+  const connected = !!ls.get("sp-token", null);
+  const r = d.result;
+  el.innerHTML = `
+    <div class="row" style="justify-content:space-between"><h2>Canción</h2>
+      <span class="muted small">Ronda ${d.round} de <input id="total" type="number" min="1" value="${d.total}" style="width:64px"></span></div>
+    ${!connected ? `<button class="primary" id="spc">Conectar Spotify</button><p class="small muted">Necesita Spotify Premium y la app de Spotify abierta en algún dispositivo.</p>` : `
+      <div class="list"><li><span class="small">${H.spotify ? (H.showTitle ? `<strong>${esc(H.spotify.title)}</strong> · ${esc(H.spotify.artist)}` : "Sonando: ••••••••") : "Nada sonando"}</span>
+        <button id="eye" class="small">${H.showTitle ? "Ocultar" : "Ver"}</button></li></div>
+      <div class="row"><button id="play">▶</button><button id="pause">⏸</button><button id="next">⏭</button>
+        <button id="spx" class="small muted">Reconectar</button></div>`}
+    ${ph === "off" ? `<p class="muted small">Pon "Canción" en los celulares para empezar.</p>` : `
+      <p><strong>Estado:</strong> ${{ waiting: "Esperando", playing: `Sonando, buzzer abierto (intento ${d.attempt})`, answering: `Responde el equipo ${d.team} (${esc(d.player)})`, judging: "Revisando respuesta…", result: "Resultado" }[ph] || ph}
+        ${d.locked.length ? `<br><span class="small muted">Bloqueados: ${d.locked.map(teamChip).join(" ")}</span>` : ""}</p>
+      <div class="grid2">
+        <button class="primary" id="openNext">Siguiente canción y abrir</button>
+        <button id="openCur">Abrir con la que suena</button>
+      </div>
+      ${ph === "result" && r ? `
+        <div class="verdict ${r.ok ? "ok" : "no"}">${r.ok ? "Correcto" : r.timeout ? "Sin respuesta" : "Incorrecto"}</div>
+        <p class="small">${teamChip(r.team)} “${esc(r.answer || "")}”<br><span class="muted">${esc(r.reason || "")}</span></p>
+        <div class="grid2">
+          ${r.ok ? `<button class="danger" id="fixNo">Corregir: era incorrecta</button>` : `<button id="fixOk">Corregir: era correcta</button>`}
+          ${!r.ok && !r.ended ? `<button class="primary" id="reopen">Seguir ya</button>` : ""}
+        </div>` : ""}
+      ${H.answers.length ? `<h3>Respuestas de esta canción</h3><ul class="list">${H.answers.map((a) =>
+        `<li><span>${teamChip(a.team)} ${esc(a.answer)}</span><span class="small" style="color:var(${a.verdict === "ok" ? "--ok" : a.verdict === "no" ? "--bad" : "--muted"})">${a.verdict || "…"}</span></li>`).join("")}</ul>` : ""}`}`;
+  $("#spc") && ($("#spc").onclick = spotifyConnect);
+  $("#spx") && ($("#spx").onclick = () => { ls.set("sp-token", null); spotifyConnect(); });
+  $("#eye") && ($("#eye").onclick = () => { H.showTitle = !H.showTitle; renderSong(); });
+  $("#play") && ($("#play").onclick = spPlay);
+  $("#pause") && ($("#pause").onclick = spPause);
+  $("#next") && ($("#next").onclick = async () => { await spNext(); refreshNowPlaying(); });
+  $("#total") && ($("#total").onchange = (e) => { ls.set("song-total", Number(e.target.value)); if (H.live.game === "cancion") setLive("cancion", H.live.phase, { ...d, total: Number(e.target.value) }); });
+  $("#openNext") && ($("#openNext").onclick = () => openSong(true));
+  $("#openCur") && ($("#openCur").onclick = () => openSong(false));
+  $("#reopen") && ($("#reopen").onclick = () => { clearTimeout(H.autoResume); reopenSong(); });
+  $("#fixOk") && ($("#fixOk").onclick = () => overrideSong(true));
+  $("#fixNo") && ($("#fixNo").onclick = () => overrideSong(false));
+}
+
+// ============ Trivia ============
+function renderTriviaLive() {
+  const box = $("#tLive"); if (!box) return;
+  const live = H.live.game === "trivia" ? H.live : null;
+  const d = live?.data || {};
+  let liveHtml = "";
+  if (d.qid) {
+    const tally = triviaTally(H.votes);
+    const teams = d.target ? [d.target] : [1, 2, 3, 4];
+    liveHtml = `<div class="card" style="background:var(--panel-2)">
+      <span class="eyebrow">${{ open: "Votando", closed: "Cerrada", reveal: "Revelada" }[live.phase] || ""}</span>
+      <strong>${esc(d.question)}</strong>
+      <ul class="list">${teams.map((t) => {
+        const x = tally[t], size = H.players.filter((p) => p.team === t && p.name !== CONFIG.TRIVIA_HOST).length;
+        return `<li>${teamChip(t)} <span>${x.answer != null ? L[x.answer] + " · " + esc(d.options[x.answer]) : "—"}</span><span class="small muted">${x.total}/${size}</span></li>`;
+      }).join("")}</ul>
+      ${live.phase === "open" ? `<button id="tClose">Cerrar votación</button>` : ""}
+      ${live.phase === "closed" ? `<p class="small muted">¿Cuál era la correcta?</p><div class="grid2">${d.options.map((o, i) => `<button data-correct="${i}">${L[i]}. ${esc(o)}</button>`).join("")}</div>` : ""}
+    </div>`;
+  }
+  box.innerHTML = liveHtml;
+  $("#tClose") && ($("#tClose").onclick = () => setLive("trivia", "closed", d));
+  box.querySelectorAll("[data-correct]").forEach((b) => b.onclick = async () => {
+    const correct = Number(b.dataset.correct);
+    const tally = triviaTally(H.votes);
+    const teams = d.target ? [d.target] : [1, 2, 3, 4];
+    const teamAnswers = {};
+    for (const t of teams) {
+      teamAnswers[t] = tally[t].answer;
+      if (tally[t].answer === correct && d.pts) await q(db.from("scores").insert({ team: t, game: "trivia", points: d.pts, note: d.question }));
+    }
+    await q(db.from("matches").insert({ game: "trivia", data: { question: d.question, options: d.options, correct, teamAnswers } }));
+    await setLive("trivia", "reveal", { ...d, reveal: { correct, teamAnswers } });
+  });
+}
+
+function renderTrivia() {
+  const el = $("#p-trivia");
+  const draft = ls.get("trivia-draft", { q: "", o: ["", "", "", ""], target: 0, pts: 1 });
+  el.innerHTML = `<h2>Trivia</h2><div id="tLive"></div>
+    <form id="tf" style="display:flex;flex-direction:column;gap:8px">
+      <label>Para<select id="tTarget"><option value="0">Todos los equipos</option>${[1, 2, 3, 4].map((t) => `<option value="${t}" ${draft.target == t ? "selected" : ""}>Equipo ${t}</option>`).join("")}</select></label>
+      <label>Pregunta<input id="tQ" value="${esc(draft.q)}"></label>
+      ${[0, 1, 2, 3].map((i) => `<label>${L[i]}<input class="tO" data-i="${i}" value="${esc(draft.o[i])}"></label>`).join("")}
+      <label>Puntos por acierto<input id="tPts" type="number" step="0.5" value="${draft.pts}" style="width:90px"></label>
+      <button class="primary">Lanzar pregunta</button>
+    </form>`;
+  const save = () => ls.set("trivia-draft", { q: $("#tQ").value, o: [...el.querySelectorAll(".tO")].map((x) => x.value), target: Number($("#tTarget").value), pts: Number($("#tPts").value) });
+  el.querySelectorAll("input,select").forEach((x) => x.oninput = save);
+  $("#tf").onsubmit = async (e) => {
+    e.preventDefault(); save();
+    const dr = ls.get("trivia-draft");
+    const options = dr.o.map((s) => s.trim()).filter(Boolean);
+    if (!dr.q.trim() || options.length < 2) return toast("Escribe la pregunta y al menos 2 alternativas");
+    H.votes = [];
+    await setLive("trivia", "open", { qid: Date.now(), question: dr.q.trim(), options, target: dr.target, pts: dr.pts });
+    ls.set("trivia-draft", { q: "", o: ["", "", "", ""], target: dr.target, pts: dr.pts });
+    render();
+  };
+  renderTriviaLive();
+}
+
+// ============ Mejor disfraz ============
+function renderCostume() {
+  const el = $("#p-costume");
+  const on = H.live.game === "disfraz", ph = on ? H.live.phase : "off", d = H.live.data || {};
+  const cand = costumeCandidates(H.noms);
+  const voters = new Set(H.ranks.map((r) => r.player)).size;
+  el.innerHTML = `<h2>Mejor disfraz</h2>
+    ${!on ? `<p class="muted small">Pon "Disfraz" en los celulares para empezar.</p>` : `
+    <p><strong>Paso:</strong> ${{ idle: "Sin empezar", nominar: "Eligiendo candidatos", cerrado: "Candidatos listos", votar: "Votando", resultados: "Resultados publicados" }[ph] || ph}</p>
+    ${ph === "nominar" || ph === "idle" ? `<ul class="list">${[1, 2, 3, 4].map((t) => {
+      const c = cand[t]; const total = Object.values(c.counts).reduce((a, b) => a + b, 0);
+      return `<li>${teamChip(t)} <span>${esc(c.candidate || "—")} ${c.candidate ? `(${c.counts[c.candidate]})` : ""}</span><span class="small muted">${total} votos</span></li>`; }).join("")}</ul>` : ""}
+    ${d.candidates && ph !== "nominar" ? `<ul class="list">${[1, 2, 3, 4].map((t) => `<li>${teamChip(t)} <strong>${esc(d.candidates[t] || "—")}</strong></li>`).join("")}</ul>` : ""}
+    ${ph === "votar" ? `<p class="small">${voters} de ${H.players.length} personas votaron.</p>` : ""}
+    <div class="grid2">
+      <button id="cNom" ${ph === "nominar" ? "disabled" : ""}>1 · Abrir nominación</button>
+      <button id="cClose" ${ph !== "nominar" ? "disabled" : ""}>2 · Cerrar nominación</button>
+      <button id="cVote" ${!d.candidates?.[1] || ph === "votar" ? "disabled" : ""}>3 · Abrir votación</button>
+      <button class="primary" id="cRes" ${ph !== "votar" ? "disabled" : ""}>4 · Mostrar resultados</button>
+    </div>
+    ${ph === "resultados" && d.results ? `<ul class="list">${[1, 2, 3, 4].sort((a, b) => d.results[b].total - d.results[a].total)
+      .map((t, i) => `<li><span>${i + 1}º ${teamChip(t)} ${esc(d.candidates[t])}</span><strong>${d.results[t].total.toFixed(2)}</strong></li>`).join("")}</ul>
+      <p class="small muted">Suma los puntos del disfraz en "Puntajes".</p>` : ""}`}`;
+  if (!on) return;
+  $("#cNom").onclick = () => setLive("disfraz", "nominar", {});
+  $("#cClose").onclick = () => {
+    const c = costumeCandidates(H.noms), candidates = {};
+    [1, 2, 3, 4].forEach((t) => candidates[t] = c[t].candidate);
+    ls.set("costume-cands", candidates);
+    setLive("disfraz", "cerrado", { candidates });
+  };
+  $("#cVote").onclick = () => setLive("disfraz", "votar", { candidates: d.candidates });
+  $("#cRes").onclick = async () => {
+    const results = costumeResults(H.ranks);
+    await q(db.from("matches").delete().eq("game", "disfraz"));
+    await q(db.from("matches").insert({ game: "disfraz", data: { candidates: d.candidates, results } }));
+    await setLive("disfraz", "resultados", { candidates: d.candidates, results });
+  };
+}
+
+// ============ Puntajes ============
+function renderScores() {
+  const el = $("#p-scores");
+  el.innerHTML = `<h2>Puntajes</h2>${renderScoreboard(H.scores)}
+    <form id="sf" class="row">
+      <select id="sTeam">${[1, 2, 3, 4].map((t) => `<option value="${t}">Equipo ${t}</option>`).join("")}</select>
+      <select id="sGame">${Object.entries(GAMES).map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>
+      <input id="sPts" type="number" step="0.5" placeholder="Pts" style="width:80px">
+      <input id="sNote" placeholder="Nota (opcional)">
+      <button class="primary" style="width:100%">Sumar</button>
+    </form>
+    <h3>Últimos</h3>
+    <ul class="list">${H.scores.slice(0, 12).map((s) => `<li><span>${teamChip(s.team)} <strong>${s.points > 0 ? "+" : ""}${s.points}</strong> ${GAMES[s.game] || s.game}</span><span class="small muted" style="flex:1;overflow-wrap:anywhere">${esc(s.note || "")}</span><button class="small danger" data-del="${s.id}">Borrar</button></li>`).join("")}</ul>`;
+  $("#sf").onsubmit = async (e) => {
+    e.preventDefault();
+    const pts = Number($("#sPts").value);
+    if (!pts) return toast("Pon los puntos");
+    await q(db.from("scores").insert({ team: Number($("#sTeam").value), game: $("#sGame").value, points: pts, note: $("#sNote").value || null }));
+    toast("Puntos sumados");
+  };
+  el.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+    if (b.dataset.confirm) { await q(db.from("scores").delete().eq("id", b.dataset.del)); }
+    else { b.dataset.confirm = 1; b.textContent = "¿Seguro?"; }
+  });
+}
+
+// ============ Beerpong y caballos ============
+const teamOpts = (sel) => [1, 2, 3, 4].map((t) => `<option value="${t}" ${sel == t ? "selected" : ""}>Equipo ${t}</option>`).join("");
+function delMatchHandlers(el) {
+  el.querySelectorAll("[data-mdel]").forEach((b) => b.onclick = async () => {
+    if (b.dataset.confirm) await q(db.from("matches").delete().eq("id", b.dataset.mdel));
+    else { b.dataset.confirm = 1; b.textContent = "¿Seguro?"; }
+  });
+}
+function renderBeer() {
+  const el = $("#p-beer");
+  const items = H.matches.filter((m) => m.game === "beerpong");
+  el.innerHTML = `<h2>Beerpong</h2>
+    <form id="bf" class="row">
+      <select id="bStage">${["Semi 1", "Semi 2", "3er lugar", "Final", "Otro"].map((s) => `<option>${s}</option>`).join("")}</select>
+      <select id="bA">${teamOpts(1)}</select><span>vs</span><select id="bB">${teamOpts(2)}</select>
+      <label style="flex-direction:row;align-items:center;gap:8px">Ganó <select id="bW"><option value="a">el primero</option><option value="b">el segundo</option></select></label>
+      <button class="primary" style="width:100%">Guardar partido</button>
+    </form>
+    <ul class="list">${items.map((m) => `<li><span>${esc(m.data.stage)}</span><span>${teamChip(m.data.a)} vs ${teamChip(m.data.b)} · gana ${teamChip(m.data.winner)}</span><button class="small danger" data-mdel="${m.id}">Borrar</button></li>`).join("")}</ul>`;
+  $("#bf").onsubmit = async (e) => {
+    e.preventDefault();
+    const a = Number($("#bA").value), b = Number($("#bB").value);
+    if (a === b) return toast("Elige dos equipos distintos");
+    await q(db.from("matches").insert({ game: "beerpong", data: { stage: $("#bStage").value, a, b, winner: $("#bW").value === "a" ? a : b } }));
+    toast("Partido guardado");
+  };
+  delMatchHandlers(el);
+}
+function renderHorse() {
+  const el = $("#p-horse");
+  const items = H.matches.filter((m) => m.game === "caballos");
+  el.innerHTML = `<h2>Carrera de caballos</h2>
+    <form id="hf" class="row">
+      ${[1, 2, 3, 4].map((p) => `<label>${p}º lugar<select class="hPos">${teamOpts(p)}</select></label>`).join("")}
+      <button class="primary" style="width:100%">Guardar carrera</button>
+    </form>
+    <ul class="list">${items.map((m, i) => `<li><span>Carrera ${i + 1}</span><span>${m.data.order.map((t, j) => `${j + 1}º ${teamChip(t)}`).join(" ")}</span><button class="small danger" data-mdel="${m.id}">Borrar</button></li>`).join("")}</ul>`;
+  $("#hf").onsubmit = async (e) => {
+    e.preventDefault();
+    const order = [...el.querySelectorAll(".hPos")].map((s) => Number(s.value));
+    if (new Set(order).size !== 4) return toast("Cada equipo debe salir una vez");
+    await q(db.from("matches").insert({ game: "caballos", data: { order } }));
+    toast("Carrera guardada");
+  };
+  delMatchHandlers(el);
+}
+</script>
+</body>
+</html>

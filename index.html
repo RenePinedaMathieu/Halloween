@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Halloween · Juegos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=Figtree:wght@400;600;700;800&display=swap">
+<link rel="stylesheet" href="app.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="shared.js"></script>
+</head>
+<body>
+<div class="wrap" id="app"><p class="muted">Cargando…</p></div>
+
+<script>
+const S = {
+  me: null, players: [], live: { game: "none", phase: "idle", data: {} },
+  scores: [], buzzes: [], answers: [], votes: [], noms: [], ranks: [], matches: [],
+  tab: "resultados", search: "", pending: null,
+  answerTimer: null, answerKey: null, answered: {}, draftRanks: {},
+};
+try { S.me = JSON.parse(localStorage.getItem("halloween-me")); } catch {}
+
+const app = $("#app");
+
+// ---------- Carga de datos ----------
+async function loadPlayers() { S.players = await q(db.from("players").select("*").order("name")); }
+async function loadLive() { S.live = (await q(db.from("live_state").select("*").eq("id", 1)))[0] || S.live; }
+async function loadScores() { S.scores = await q(db.from("scores").select("*")); }
+async function loadMatches() { S.matches = await q(db.from("matches").select("*").order("created_at")); }
+async function loadRoundData() {
+  const d = S.live.data || {};
+  if (S.live.game === "cancion" && d.round) {
+    S.buzzes = await q(db.from("buzzes").select("*").eq("round", d.round).order("id"));
+    S.answers = await q(db.from("song_answers").select("*").eq("round", d.round).order("id"));
+  }
+  if (S.live.game === "trivia" && d.qid) S.votes = await q(db.from("trivia_votes").select("*").eq("question_id", d.qid));
+  if (S.live.game === "disfraz") {
+    S.noms = await q(db.from("costume_noms").select("*"));
+    if (S.me) S.ranks = await q(db.from("costume_ranks").select("*").eq("player", S.me.name));
+  }
+}
+
+async function init() {
+  await Promise.all([loadPlayers(), loadLive(), loadScores(), loadMatches()]);
+  if (S.me) {
+    const p = S.players.find((x) => x.name === S.me.name);
+    S.me = p ? { name: p.name, team: p.team } : null;   // por si cambiaron de equipo
+  }
+  await loadRoundData();
+  S.tab = tabForGame(S.live.game);
+  render();
+  listen(["live_state", "scores", "buzzes", "song_answers", "trivia_votes", "costume_noms", "costume_ranks", "matches"], async (t) => {
+    if (t === "live_state") {
+      const prev = S.live.game;
+      await loadLive(); await loadRoundData();
+      const ld = S.live.data || {};
+      const needsMe = ["playing", "open", "nominar", "votar"].includes(S.live.phase) || (S.live.phase === "answering" && ld.team === S.me?.team);
+      if ((S.live.game !== prev && S.live.game !== "none") || needsMe) S.tab = tabForGame(S.live.game);   // salta solo al juego que necesita al jugador
+    }
+    else if (t === "scores") await loadScores();
+    else if (t === "matches") await loadMatches();
+    else await loadRoundData();
+    if (S.me) render();   // en el selector de nombre no se redibuja para no cortar la búsqueda
+  });
+}
+
+// ---------- Render ----------
+// La app toma el color del equipo del jugador
+function applyTeamColor() {
+  const root = document.documentElement.style;
+  if (S.me) {
+    const c = TEAMS[S.me.team].color;
+    root.setProperty("--accent", c);
+    root.setProperty("--tint", `color-mix(in srgb, ${c} 45%, transparent)`);
+  } else { root.removeProperty("--accent"); root.removeProperty("--tint"); }
+}
+
+function render() {
+  applyTeamColor();
+  if (!S.me) return renderPicker();
+  const t = S.me.team;
+  app.innerHTML = `
+    <div class="card me" style="--c:${TEAMS[t].color}">
+      <div class="who"><span class="eyebrow">Halloween · ${TEAMS[t].name}</span><strong>${esc(S.me.name)}</strong></div>
+      ${teamChip(t)}
+    </div>
+    <nav class="tabs5">
+      ${TABS.map(([k, l]) => `<button class="${S.tab === k ? "sel" : ""}" data-tab="${k}">${l}${S.live.game === k ? '<i class="live"></i>' : ""}</button>`).join("")}
+    </nav>
+    <div id="body"></div>
+    <div class="row" style="justify-content:center">
+      <button class="small" id="logout">No soy ${esc(S.me.name)}</button>
+      <a class="btn small" id="toHost" href="host.html">Panel anfitrión</a>
+    </div>`;
+  app.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { S.tab = b.dataset.tab; render(); });
+  $("#logout").onclick = () => { try { localStorage.removeItem("halloween-me"); } catch {} S.me = null; render(); };
+  const body = $("#body");
+  if (S.tab === "equipo") body.innerHTML = renderTeam();
+  else if (S.tab === "cancion") renderSong(body);
+  else if (S.tab === "trivia") renderTrivia(body);
+  else if (S.tab === "disfraz") renderCostume(body);
+  else body.innerHTML = renderResults();
+}
+
+const TABS = [["cancion", "Canción"], ["trivia", "Trivia"], ["disfraz", "Disfraz"], ["resultados", "Tabla"], ["equipo", "Equipo"]];
+// Pestaña que corresponde al juego en vivo
+function tabForGame(g) { return ["cancion", "trivia", "disfraz"].includes(g) ? g : "resultados"; }
+
+function renderPicker() {
+  const list = S.players.filter((p) => normalizeSong(p.name).includes(normalizeSong(S.search)));
+  if (S.pending) {
+    const p = S.pending;
+    app.innerHTML = `<div class="card" style="border-left:8px solid ${TEAMS[p.team].color}">
+      <span class="eyebrow">Confirma</span><h1>${esc(p.name)}</h1>
+      <p>Vas en el <strong>${TEAMS[p.team].name}</strong>.</p>
+      <div class="grid2"><button id="no">Volver</button><button class="primary" id="yes">Soy yo</button></div></div>`;
+    $("#no").onclick = () => { S.pending = null; render(); };
+    $("#yes").onclick = async () => {
+      S.me = { name: p.name, team: p.team }; S.pending = null;
+      try { localStorage.setItem("halloween-me", JSON.stringify(S.me)); } catch {}
+      await loadRoundData(); render();
+    };
+    return;
+  }
+  app.innerHTML = `
+    <div><span class="eyebrow">Halloween 2026</span><h1>¿Quién eres?</h1></div>
+    <input id="search" placeholder="Busca tu nombre" value="${esc(S.search)}" autocomplete="off">
+    <div class="names">${list.map((p) => `<button data-name="${esc(p.name)}" style="--c:${TEAMS[p.team].color}">${esc(p.name)}</button>`).join("")}</div>`;
+  const s = $("#search");
+  s.oninput = () => { S.search = s.value; const pos = s.selectionStart; renderPicker(); const n = $("#search"); n.focus(); n.setSelectionRange(pos, pos); };
+  app.querySelectorAll("[data-name]").forEach((b) => b.onclick = async () => {
+    const p = S.players.find((x) => x.name === b.dataset.name);
+    S.me = { name: p.name, team: p.team }; S.tab = tabForGame(S.live.game); S.search = "";
+    try { localStorage.setItem("halloween-me", JSON.stringify(S.me)); } catch {}
+    await loadRoundData(); render(); window.scrollTo(0, 0);
+  });
+}
+
+function renderTeam() {
+  const t = S.me.team;
+  const mates = S.players.filter((p) => p.team === t);
+  return `<div class="card" style="--c:${TEAMS[t].color}">
+    <h2>${TEAMS[t].name}</h2><p class="muted small">${mates.length} integrantes</p>
+    <ul class="mates">${mates.map((m) => `<li class="${m.name === S.me.name ? "self" : ""}">${esc(m.name)}</li>`).join("")}</ul></div>`;
+}
+
+// ---------- Resultados de todas las competencias ----------
+const byGame = (g) => S.matches.filter((m) => m.game === g);
+function songHistory() {
+  const items = byGame("cancion");
+  if (!items.length) return `<p class="muted small">Aún no se adivina ninguna canción.</p>`;
+  return `<ul class="list">${items.map((m) => `<li><span>${m.data.round}. <strong>${esc(m.data.title)}</strong> <span class="muted small">${esc(m.data.artist || "")}</span></span>${teamChip(m.data.team)}</li>`).join("")}</ul>`;
+}
+function triviaHistory() {
+  const items = byGame("trivia"), L = "ABCDEF";
+  if (!items.length) return `<p class="muted small">Aún no hay preguntas respondidas.</p>`;
+  return `<ul class="list">${items.map((m) => `<li style="flex-direction:column;align-items:stretch">
+    <span><strong>${esc(m.data.question)}</strong><br><span class="small muted">Correcta: ${L[m.data.correct]}. ${esc(m.data.options[m.data.correct])}</span></span>
+    <span class="row">${Object.entries(m.data.teamAnswers).map(([t, a]) => `<span class="small">${teamChip(t)} <strong style="color:var(${a === m.data.correct ? "--ok" : "--bad"})">${a == null ? "–" : L[a]}</strong></span>`).join("")}</span></li>`).join("")}</ul>`;
+}
+function costumeTable(r, cands) {
+  const order = [1, 2, 3, 4].sort((a, b) => r[b].total - r[a].total);
+  return `<div class="scroll"><table class="scores"><thead><tr><th>#</th><th>Equipo</th><th>Disfraz</th>${CATEGORIES.map((c) => `<th>${CAT_LABEL[c]}</th>`).join("")}<th>Total</th></tr></thead>
+    <tbody>${order.map((t, i) => `<tr><td>${i + 1}</td><td>${teamChip(t)}</td><td>${esc(cands[t] || "")}</td>${CATEGORIES.map((c) => `<td>${r[t][c].toFixed(2)}</td>`).join("")}<td class="total">${r[t].total.toFixed(2)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+function renderResults() {
+  const beer = byGame("beerpong"), horse = byGame("caballos"), cost = byGame("disfraz").slice(-1)[0];
+  return `
+    <div class="card"><span class="eyebrow">General</span><h2>Tabla de puntajes</h2>${renderScoreboard(S.scores)}</div>
+    <div class="card"><h3>Beerpong</h3>${beer.length ? `<ul class="list">${beer.map((m) => `<li><span>${esc(m.data.stage)}</span><span>${teamChip(m.data.a)} vs ${teamChip(m.data.b)}</span><span class="small">gana ${teamChip(m.data.winner)}</span></li>`).join("")}</ul>` : `<p class="muted small">Aún no hay partidos.</p>`}</div>
+    <div class="card"><h3>Adivina la canción</h3>${songHistory()}</div>
+    <div class="card"><h3>Trivia</h3>${triviaHistory()}</div>
+    <div class="card"><h3>Mejor disfraz</h3>${cost ? costumeTable(cost.data.results, cost.data.candidates) : `<p class="muted small">Todavía no se vota.</p>`}</div>
+    <div class="card"><h3>Carrera de caballos</h3>${horse.length ? `<ul class="list">${horse.map((m, i) => `<li><span>Carrera ${i + 1}</span><span>${m.data.order.map((t, j) => `${j + 1}º ${teamChip(t)}`).join(" ")}</span></li>`).join("")}</ul>` : `<p class="muted small">Aún no hay carreras.</p>`}</div>`;
+}
+
+// ---------- Adivina la canción ----------
+function renderSong(body) {
+  const d = S.live.data || {}, ph = S.live.game === "cancion" ? S.live.phase : "off", myT = S.me.team;
+  const locked = d.locked || [];
+  const head = `<span class="eyebrow">Adivina la canción${ph !== "off" && d.round ? ` · Canción ${d.round}${d.total ? " de " + d.total : ""}` : ""}</span>`;
+
+  if (ph === "off") {
+    body.innerHTML = `<div class="card">${head}<h2>Buzzer</h2>
+      <button class="buzzer" disabled>¡Yo sé!</button>
+      <p class="muted small" style="text-align:center">Se activa cuando empiece a sonar la canción.</p></div>
+      <div class="card"><h3>Canciones adivinadas</h3>${songHistory()}</div>`;
+    return;
+  }
+
+  if (ph === "playing") {
+    const already = S.buzzes.some((b) => b.player === S.me.name && b.attempt === d.attempt);
+    const blocked = locked.includes(myT);
+    body.innerHTML = `<div class="card">${head}<h2>¡Suena!</h2>
+      <button class="buzzer${blocked ? " blocked" : ""}" id="buzz" ${already || blocked ? "disabled" : ""}>${blocked ? "Bloqueado" : already ? "¡Listo!" : "¡Yo sé!"}</button>
+      <p class="muted small" style="text-align:center">${blocked ? "Tu equipo ya falló esta canción." : "El primer equipo en apretar tiene " + CONFIG.ANSWER_SECONDS + " segundos para escribir el nombre."}</p></div>`;
+    const b = $("#buzz");
+    if (b) b.onclick = async () => {
+      b.disabled = true; b.textContent = "¡Listo!";
+      if (navigator.vibrate) navigator.vibrate(80);
+      await q(db.from("buzzes").insert({ round: d.round, attempt: d.attempt, player: S.me.name, team: myT }));
+    };
+    return;
+  }
+
+  if (ph === "answering") {
+    const key = `${d.round}-${d.attempt}`;
+    if (d.player !== S.me.name) {
+      body.innerHTML = `<div class="card">${head}<h2>${d.team === myT ? esc(d.player) + " está escribiendo" : "Responde el " + teamChip(d.team)}</h2>
+        <p class="muted">${d.team === myT ? "Tu compañero apretó primero y tiene " : esc(d.player) + " apretó primero y tiene "}${CONFIG.ANSWER_SECONDS} segundos para escribir la canción.</p></div>`;
+      return;
+    }
+    {
+      const sent = S.answered[key] || S.answers.some((a) => a.attempt === d.attempt && a.player === S.me.name);
+      if (sent) { body.innerHTML = `<div class="card">${head}<h2>Enviado</h2><p class="muted">Revisando tu respuesta…</p></div>`; return; }
+      if (S.answerKey !== key) {
+        S.answerKey = key; S.deadline = Date.now() + CONFIG.ANSWER_SECONDS * 1000;
+        clearInterval(S.answerTimer);
+        S.answerTimer = setInterval(() => {
+          const left = Math.max(0, Math.ceil((S.deadline - Date.now()) / 1000));
+          const el = $("#cd"); if (el) el.textContent = left;
+          if (left <= 0) { clearInterval(S.answerTimer); const i = $("#ans"); if (i) i.disabled = true; const s = $("#send"); if (s) s.disabled = true; }
+        }, 200);
+      }
+      if (S.draftKey !== key) { S.draftKey = key; S.draftAns = ""; }
+      const keep = S.draftAns;
+      body.innerHTML = `<div class="card">${head}
+        <h2>¡Apretaste primero!</h2><p class="muted small">Escribe el nombre de la canción. No tiene que estar perfecto.</p>
+        <div class="countdown" id="cd">${Math.max(0, Math.ceil((S.deadline - Date.now()) / 1000))}</div>
+        <form id="f" class="row"><input id="ans" placeholder="Nombre de la canción" autocomplete="off" value="${esc(keep)}">
+        <button class="primary" id="send" style="width:100%">Enviar</button></form></div>`;
+      const i = $("#ans"); i.focus(); i.setSelectionRange(i.value.length, i.value.length);
+      i.oninput = () => { S.draftAns = i.value; };
+      $("#f").onsubmit = async (e) => {
+        e.preventDefault();
+        if (!i.value.trim() || Date.now() > S.deadline + 500) return;
+        S.answered[key] = true; clearInterval(S.answerTimer); render();
+        await q(db.from("song_answers").insert({ round: d.round, attempt: d.attempt, player: S.me.name, team: myT, answer: i.value.trim() }));
+      };
+    }
+    return;
+  }
+
+  if (ph === "judging") {
+    body.innerHTML = `<div class="card">${head}<h2>Revisando…</h2><p class="muted">Viendo si la respuesta del ${teamChip(d.team)} calza.</p></div>`;
+    return;
+  }
+
+  if (ph === "result" && d.result) {
+    const r = d.result;
+    body.innerHTML = `<div class="card">${head}
+      <div class="verdict ${r.ok ? "ok" : "no"}">${r.ok ? "¡Correcto!" : r.timeout ? "Se acabó el tiempo" : "No es"}</div>
+      <p style="text-align:center">${teamChip(r.team)} ${r.answer ? `respondió <strong>“${esc(r.answer)}”</strong>` : ""}</p>
+      ${r.ok && r.title ? `<p class="muted" style="text-align:center">Era <strong>${esc(r.title)}</strong> · ${esc(r.artist || "")}</p>` : ""}
+      ${r.reason ? `<p class="muted small" style="text-align:center">${esc(r.reason)}</p>` : ""}
+      ${!r.ok && !r.ended ? `<p class="small" style="text-align:center"><strong>La canción sigue en unos segundos.</strong> ${teamChip(r.team)} queda bloqueado en esta canción.</p>` : ""}
+      ${r.ended && !r.ok ? `<p class="muted" style="text-align:center">Nadie la adivinó. Era <strong>${esc(r.title || "")}</strong> · ${esc(r.artist || "")}</p>` : ""}</div>
+      <div class="card"><h3>Canciones adivinadas</h3>${songHistory()}</div>`;
+    return;
+  }
+
+  body.innerHTML = `<div class="card">${head}<h2>Prepárense</h2>
+    <button class="buzzer" disabled>¡Yo sé!</button>
+    <p class="muted small" style="text-align:center">La próxima canción parte en cualquier momento. Tengan el dedo listo.</p></div>
+    <div class="card"><h3>Canciones adivinadas</h3>${songHistory()}</div>`;
+}
+
+// ---------- Trivia ----------
+function renderTrivia(body) {
+  const on = S.live.game === "trivia";
+  const d = on ? S.live.data || {} : {}, ph = S.live.phase, myT = S.me.team;
+  const hist = `<div class="card"><h3>Preguntas anteriores</h3>${triviaHistory()}</div>`;
+  if (!d.qid) { body.innerHTML = `<div class="card"><span class="eyebrow">Trivia</span><h2>Esperando la pregunta</h2><p class="muted">Cuando Rene lance una pregunta, las alternativas aparecen aquí para votar.</p></div>${hist}`; return; }
+  const isHost = S.me.name === CONFIG.TRIVIA_HOST;
+  const forMe = !isHost && (!d.target || d.target === myT);
+  const tally = triviaTally(S.votes);
+  const mine = S.votes.find((v) => v.player === S.me.name);
+  const L = "ABCDEF";
+  const t = tally[myT];
+  const reveal = ph === "reveal" ? d.reveal : null;
+
+  body.innerHTML = `<div class="card" style="--c:${TEAMS[myT].color}">
+    <span class="eyebrow">Trivia ${d.target ? "· para el " + TEAMS[d.target].name : "· todos los equipos"}</span>
+    <h2 style="text-transform:none;font-size:30px">${esc(d.question)}</h2>
+    <div class="options">${d.options.map((o, i) => {
+      const n = t.counts[i] || 0;
+      const isCorrect = reveal && reveal.correct === i;
+      return `<button data-opt="${i}" class="${isCorrect ? "correct" : mine?.option === i ? "sel" : ""}" ${!forMe || ph !== "open" ? "disabled" : ""}>
+        <span><strong>${L[i]}.</strong> ${esc(o)}</span>${forMe ? `<span class="small">${n || ""}</span>` : ""}</button>`;
+    }).join("")}</div>
+    ${forMe && ph === "open" ? `<p class="small muted">Gana la alternativa con más votos de tu equipo. Puedes cambiar tu voto hasta que se cierre.</p>
+      <p>Tu equipo va por: <strong>${t.answer != null ? L[t.answer] : "—"}</strong> <span class="muted small">(${t.total} de ${S.players.filter((p) => p.team === myT && p.name !== CONFIG.TRIVIA_HOST).length} votaron)</span></p>` : ""}
+    ${isHost ? `<p class="muted">Tú haces las preguntas, así que no votas. Maneja la trivia desde el Panel anfitrión.</p>` : !forMe ? `<p class="muted">Esta pregunta es para otro equipo. Mira cómo les va.</p>` : ""}
+    ${ph === "closed" ? `<p class="muted">Votación cerrada. Esperando la respuesta correcta…</p>` : ""}
+    ${reveal ? `<div class="list">${Object.entries(reveal.teamAnswers).map(([tm, a]) =>
+      `<li>${teamChip(tm)} <span>${a == null ? "Sin respuesta" : L[a]}</span> <strong style="color:var(${a === reveal.correct ? "--ok" : "--bad"})">${a === reveal.correct ? "✓" : "✗"}</strong></li>`).join("")}</div>` : ""}
+  </div>${hist}`;
+  body.querySelectorAll("[data-opt]").forEach((b) => b.onclick = async () => {
+    await q(db.from("trivia_votes").upsert({ question_id: d.qid, player: S.me.name, team: myT, option: Number(b.dataset.opt), updated_at: new Date().toISOString() }));
+  });
+}
+
+// ---------- Mejor disfraz ----------
+function renderCostume(body) {
+  const on = S.live.game === "disfraz";
+  const d = on ? S.live.data || {} : {}, ph = on ? S.live.phase : "off", myT = S.me.team;
+  const mates = S.players.filter((p) => p.team === myT);
+
+  if (ph === "nominar") {
+    const mine = S.noms.find((n) => n.player === S.me.name);
+    const c = costumeCandidates(S.noms)[myT].counts;
+    body.innerHTML = `<div class="card"><span class="eyebrow">Mejor disfraz · paso 1</span>
+      <h2>¿Quién representa a tu equipo?</h2><p class="muted small">El más votado de tu equipo compite.</p>
+      <div class="names">${mates.map((m) => `<button data-c="${esc(m.name)}" class="${mine?.candidate === m.name ? "sel" : ""}" style="--c:${TEAMS[myT].color}">${esc(m.name)} <span class="muted small">${c[m.name] || ""}</span></button>`).join("")}</div></div>`;
+    body.querySelectorAll("[data-c]").forEach((b) => b.onclick = async () => {
+      await q(db.from("costume_noms").upsert({ player: S.me.name, team: myT, candidate: b.dataset.c, updated_at: new Date().toISOString() }));
+    });
+    return;
+  }
+
+  const cands = d.candidates || {};
+  const candList = `<div class="list">${[1, 2, 3, 4].map((t) => `<li>${teamChip(t)} <strong>${esc(cands[t] || "—")}</strong></li>`).join("")}</div>`;
+
+  if (ph === "votar") {
+    const others = [1, 2, 3, 4].filter((t) => t !== myT);
+    for (const cat of CATEGORIES) {
+      if (!S.draftRanks[cat]) S.draftRanks[cat] = S.ranks.find((r) => r.category === cat)?.ranking?.slice() || [];
+    }
+    const done = CATEGORIES.every((c) => S.draftRanks[c].length === 3);
+    const sent = S.ranks.length === 3;
+    body.innerHTML = `<div class="card"><span class="eyebrow">Mejor disfraz · paso 2</span>
+      <h2>Ordena los disfraces</h2><p class="muted small">En cada categoría toca del mejor al peor. Toca de nuevo para borrar.</p>
+      ${CATEGORIES.map((cat) => `<div class="rankrow"><h3>${CAT_LABEL[cat]}</h3><div class="pick">
+        ${others.map((t) => { const pos = S.draftRanks[cat].indexOf(t);
+          return `<button data-cat="${cat}" data-t="${t}" class="${pos >= 0 ? "sel" : ""}">${pos >= 0 ? `<span class="pos">${pos + 1}º</span>` : ""}${teamChip(t)} ${esc(cands[t] || "")}</button>`; }).join("")}
+      </div></div>`).join("")}
+      <button class="primary" id="sendRank" ${done ? "" : "disabled"}>${sent ? "Actualizar mi voto" : "Enviar voto"}</button>
+      ${sent ? `<p class="small muted">Tu voto está guardado.</p>` : ""}</div>`;
+    body.querySelectorAll("[data-cat]").forEach((b) => b.onclick = () => {
+      const arr = S.draftRanks[b.dataset.cat], t = Number(b.dataset.t), i = arr.indexOf(t);
+      if (i >= 0) arr.splice(i, 1); else if (arr.length < 3) arr.push(t);
+      renderCostume(body);
+    });
+    $("#sendRank").onclick = async () => {
+      await q(db.from("costume_ranks").upsert(CATEGORIES.map((cat) => ({ player: S.me.name, team: myT, category: cat, ranking: S.draftRanks[cat] }))));
+      toast("Voto enviado");
+    };
+    return;
+  }
+
+  const past = byGame("disfraz").slice(-1)[0];
+  if ((ph === "resultados" && d.results) || (ph === "off" && past)) {
+    const r = d.results || past.data.results, cc = d.results ? cands : past.data.candidates;
+    body.innerHTML = `<div class="card"><span class="eyebrow">Mejor disfraz</span><h2>Resultados</h2>${costumeTable(r, cc)}</div>`;
+    return;
+  }
+
+  body.innerHTML = `<div class="card"><span class="eyebrow">Mejor disfraz</span><h2>${cands[1] ? "Candidatos" : "Esperando"}</h2>${cands[1] ? candList : `<p class="muted">En un rato se abre la votación.</p>`}</div>`;
+}
+
+init().catch((e) => { app.innerHTML = `<div class="card"><h2>No se pudo conectar</h2><p class="muted">${esc(e.message || e)}</p></div>`; });
+</script>
+</body>
+</html>
