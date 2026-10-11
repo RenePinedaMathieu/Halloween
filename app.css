@@ -127,3 +127,5 @@ button.small, .btn.small { font-size: 13px; padding: 8px 12px; }
 .trk .t { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .trk .t strong, .trk .t span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .judge button { white-space: nowrap; }
+.plbox { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px; background: var(--panel-2); }
+.plbox select { width: 100%; }
