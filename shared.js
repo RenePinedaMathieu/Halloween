@@ -2,7 +2,7 @@
 const CONFIG = {
   SUPABASE_URL: "https://gtpamfivoajjavktmpew.supabase.co",
   SUPABASE_ANON_KEY: "sb_publishable_b-Ka2xJleSBXRBh1ecNoQw_IyAJwfx_",
-  SPOTIFY_CLIENT_ID: "TU_SPOTIFY_CLIENT_ID",
+  SPOTIFY_CLIENT_ID: "360ac0ec33214e52be0cae7e79c11006",
   HOST_PIN: "1234",          // clave del panel del anfitrión
   TRIVIA_HOST: "Rene",       // quien hace las preguntas de trivia (no vota)
   SONG_POINTS: 1,            // puntos por canción adivinada
