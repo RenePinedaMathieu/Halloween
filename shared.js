@@ -128,20 +128,6 @@ function costumeResults(ranks) {
   return res;
 }
 
-// ---------- Juez de canciones (el mismo criterio para la IA en Vercel y en la demo) ----------
-function judgePrompt(title, artist, answer) {
-  return `Eres el juez de "adivina la canción" en una fiesta de Halloween en Chile.
-Canción que está sonando: "${title}"${artist ? ` de ${artist}` : ""}
-Lo que escribió el jugador: "${answer}"
-
-¿Adivinó el NOMBRE de la canción? Sé generoso como un buen amigo, pero no regales puntos:
-- SÍ vale: faltas de ortografía, escribirlo como suena, sin tildes, mayúsculas, palabras de relleno, abreviaciones obvias, traducción obvia del título.
-- SÍ vale: el título sin "(feat. ...)", "- Remastered", "(Live)", "Remix" y similares; o el título junto con el artista.
-- SÍ vale: la parte del coro con que todo el mundo conoce la canción, si identifica claramente ESA canción.
-- NO vale: solo el artista, otra canción del mismo artista, una palabra suelta demasiado genérica, o algo que no se parece.
-Responde SOLO con JSON: {"match": true o false, "reason": "frase corta en español para mostrar a los jugadores"}`;
-}
-
 // ---------- Comparación aproximada (respaldo si la IA falla) ----------
 function normalizeSong(s) {
   return String(s).toLowerCase()

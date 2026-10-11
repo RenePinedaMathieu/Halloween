@@ -244,7 +244,10 @@ function renderSong(body) {
   }
 
   if (ph === "judging") {
-    body.innerHTML = `<div class="card">${head}<h2>Revisando…</h2><p class="muted">Viendo si la respuesta del ${teamChip(d.team)} calza.</p></div>`;
+    const p = d.pending;
+    body.innerHTML = `<div class="card">${head}<h2>¿Será?</h2>
+      ${p ? `<p style="text-align:center">${teamChip(p.team)} ${esc(p.player)} respondió<br><strong style="font-size:22px">“${esc(p.answer)}”</strong></p>` : ""}
+      <p class="muted" style="text-align:center">${esc(CONFIG.TRIVIA_HOST)} está decidiendo…</p></div>`;
     return;
   }
 

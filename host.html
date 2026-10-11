@@ -95,6 +95,7 @@ function render() {
     <div class="card" id="p-mic"></div>
     <div class="grid-host">
       <div class="card" id="p-song"></div>
+      <div class="card" id="p-queue"></div>
       <div class="card" id="p-trivia"></div>
       <div class="card" id="p-costume"></div>
       <div class="card" id="p-scores"></div>
@@ -108,7 +109,7 @@ function render() {
     if (k === "disfraz") return setLive("disfraz", "idle", { candidates: ls.get("costume-cands", {}) });
     setLive(k, "idle", {});
   });
-  renderMic(); renderSong(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
+  renderMic(); renderSong(); renderQueue(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
 }
 
 // ============ Spotify (PKCE, sin servidor) ============
@@ -259,27 +260,29 @@ async function onAnswer(a) {
   const d = songData();
   if (H.live.phase !== "answering" || a.round !== d.round || a.attempt !== d.attempt || a.player !== d.player) return;
   clearTimeout(H.answerTimeout);
-  await setLive("cancion", "judging", d);
+  if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+  toast("Llegó la respuesta de " + a.player);
+  // Tú decides: la respuesta queda esperando en el panel
+  await setLive("cancion", "judging", { ...d, pending: { id: a.id, team: a.team, player: a.player, answer: a.answer } });
+  document.getElementById("p-song")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// Tu veredicto desde el panel
+async function judgeSong(ok) {
+  const d = songData(), a = d.pending;
+  if (H.live.phase !== "judging" || !a) return;
   const track = H.track || { title: H.spotify?.title, artist: H.spotify?.artist };
-  let ok = false, reason = "";
-  try {
-    const r = await fetch("/api/judge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: track.title, artist: track.artist, answer: a.answer }) });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || r.status);
-    ok = j.match; reason = j.reason;
-  } catch (e) {
-    ok = fuzzyMatch(track.title, a.answer);
-    reason = "Revisión automática sin IA (" + (e.message || e) + ")";
-  }
-  await q(db.from("song_answers").update({ verdict: ok ? "ok" : "no", reason }).eq("id", a.id));
+  await q(db.from("song_answers").update({ verdict: ok ? "ok" : "no" }).eq("id", a.id));
+  const rest = { ...d, pending: null };
   if (ok) {
     const s = await q(db.from("scores").insert({ team: a.team, game: "cancion", points: CONFIG.SONG_POINTS, note: `Canción ${d.round}: ${track.title}` }).select());
     H.lastSongScoreId = s[0]?.id;
     const m = await q(db.from("matches").insert({ game: "cancion", data: { round: d.round, title: track.title, artist: track.artist, team: a.team } }).select());
     H.lastSongMatchId = m[0]?.id;
+    await setLive("cancion", "result", { ...rest, result: { ok: true, team: a.team, answer: a.answer, title: track.title, artist: track.artist } });
+  } else {
+    await finishWrong(rest, { ok: false, team: a.team, answer: a.answer });
   }
-  if (ok) await setLive("cancion", "result", { ...d, result: { ok, team: a.team, answer: a.answer, reason, title: track.title, artist: track.artist } });
-  else await finishWrong(d, { ok: false, team: a.team, answer: a.answer, reason });
 }
 
 // Respuesta mala o sin respuesta: se bloquea al equipo y la canción sigue sola.
@@ -331,15 +334,22 @@ function renderSong() {
       <div class="row"><button id="play">▶</button><button id="pause">⏸</button><button id="next">⏭</button>
         <button id="spx" class="small muted">Reconectar</button></div>`}
     ${ph === "off" ? `<p class="muted small">Pon "Canción" en los celulares para empezar.</p>` : `
-      <p><strong>Estado:</strong> ${{ waiting: "Esperando", playing: `Sonando, buzzer abierto (intento ${d.attempt})`, answering: `Responde el equipo ${d.team} (${esc(d.player)})`, judging: "Revisando respuesta…", result: "Resultado" }[ph] || ph}
+      <p><strong>Estado:</strong> ${{ waiting: "Esperando", playing: `Sonando, buzzer abierto (intento ${d.attempt})`, answering: `${esc(d.player)} (equipo ${d.team}) está escribiendo…`, judging: "Te toca decidir", result: "Resultado" }[ph] || ph}
         ${d.locked.length ? `<br><span class="small muted">Bloqueados: ${d.locked.map(teamChip).join(" ")}</span>` : ""}</p>
       <div class="grid2">
         <button class="primary" id="openNext">Siguiente canción y abrir</button>
         <button id="openCur">Abrir con la que suena</button>
       </div>
+      ${ph === "judging" && d.pending ? `
+        <div class="card judge">
+          <span class="eyebrow">${teamChip(d.pending.team)} ${esc(d.pending.player)} escribió</span>
+          <div class="answer">“${esc(d.pending.answer)}”</div>
+          <p class="small muted">Era: <strong>${esc(H.track?.title || H.spotify?.title || "?")}</strong> · ${esc(H.track?.artist || H.spotify?.artist || "")}</p>
+          <div class="grid2"><button class="danger" id="jNo">✗ Incorrecta</button><button class="primary okbtn" id="jOk">✓ Correcta</button></div>
+        </div>` : ""}
       ${ph === "result" && r ? `
         <div class="verdict ${r.ok ? "ok" : "no"}">${r.ok ? "Correcto" : r.timeout ? "Sin respuesta" : "Incorrecto"}</div>
-        <p class="small">${teamChip(r.team)} “${esc(r.answer || "")}”<br><span class="muted">${esc(r.reason || "")}</span></p>
+        <p class="small">${teamChip(r.team)} “${esc(r.answer || "")}”${r.reason ? `<br><span class="muted">${esc(r.reason)}</span>` : ""}</p>
         <div class="grid2">
           ${r.ok ? `<button class="danger" id="fixNo">Corregir: era incorrecta</button>` : `<button id="fixOk">Corregir: era correcta</button>`}
           ${!r.ok && !r.ended ? `<button class="primary" id="reopen">Seguir ya</button>` : ""}
@@ -356,8 +366,58 @@ function renderSong() {
   $("#openNext") && ($("#openNext").onclick = () => openSong(true));
   $("#openCur") && ($("#openCur").onclick = () => openSong(false));
   $("#reopen") && ($("#reopen").onclick = () => { clearTimeout(H.autoResume); reopenSong(); });
+  $("#jOk") && ($("#jOk").onclick = () => judgeSong(true));
+  $("#jNo") && ($("#jNo").onclick = () => judgeSong(false));
   $("#fixOk") && ($("#fixOk").onclick = () => overrideSong(true));
   $("#fixNo") && ($("#fixNo").onclick = () => overrideSong(false));
+}
+
+// ============ Cola de Spotify: buscar y agregar canciones ============
+H.qSearch = ""; H.qResults = []; H.qUpcoming = null; H.qBusy = false;
+const trackRow = (t) => ({ uri: t.uri, title: t.name, artist: (t.artists || []).map((a) => a.name).join(", "), img: t.album?.images?.slice(-1)[0]?.url || "" });
+
+async function queueSearch() {
+  const term = H.qSearch.trim(); if (!term) return;
+  H.qBusy = true; renderQueue();
+  try {
+    const r = await sp("GET", "/search?type=track&limit=8&q=" + encodeURIComponent(term));
+    H.qResults = (r?.tracks?.items || []).map(trackRow);
+    if (!H.qResults.length) toast("No encontré nada con eso");
+  } catch (e) { toast(e.message); }
+  H.qBusy = false; renderQueue();
+}
+async function queueAdd(uri, title) {
+  try {
+    await sp("POST", "/me/player/queue?uri=" + encodeURIComponent(uri));
+    toast("Agregada: " + title);
+    await queueLoad();
+  } catch (e) { toast(e.message); }
+}
+async function queueLoad() {
+  try {
+    const r = await sp("GET", "/me/player/queue");
+    H.qUpcoming = (r?.queue || []).slice(0, 6).map(trackRow);
+  } catch (e) { H.qUpcoming = null; }
+  renderQueue();
+}
+function renderQueue() {
+  const el = $("#p-queue"); if (!el) return;
+  const connected = !!ls.get("sp-token", null);
+  if (!connected) { el.innerHTML = `<h2>Agregar canciones</h2><p class="muted small">Conecta Spotify en la sección Canción para buscar y agregar canciones a la cola.</p>`; return; }
+  const row = (t, add) => `<li class="trk">${t.img ? `<img src="${esc(t.img)}" alt="">` : ""}<span class="t"><strong>${esc(t.title)}</strong><span class="small muted">${esc(t.artist)}</span></span>
+    ${add ? `<button class="small" data-add="${esc(t.uri)}" data-title="${esc(t.title)}">+ Cola</button>` : ""}</li>`;
+  el.innerHTML = `<h2>Agregar canciones</h2>
+    <form id="qf" class="row" style="flex-wrap:nowrap"><input id="qIn" placeholder="Canción o artista" value="${esc(H.qSearch)}" autocomplete="off">
+      <button class="primary" ${H.qBusy ? "disabled" : ""}>${H.qBusy ? "…" : "Buscar"}</button></form>
+    ${H.qResults.length ? `<ul class="list">${H.qResults.map((t) => row(t, true)).join("")}</ul>` : ""}
+    <div class="row" style="justify-content:space-between"><h3>Próximas en la cola</h3><button class="small" id="qRef">Actualizar</button></div>
+    ${H.qUpcoming == null ? `<p class="small muted">Toca "Actualizar" para ver la cola.</p>`
+      : H.qUpcoming.length ? `<ul class="list">${H.qUpcoming.map((t) => row(t, false)).join("")}</ul>` : `<p class="small muted">La cola está vacía.</p>`}
+    <p class="small muted">Lo que agregas suena después de la canción actual. Ojo: "Siguiente canción" del juego también avanza la cola.</p>`;
+  const i = $("#qIn"); i.oninput = () => { H.qSearch = i.value; };
+  $("#qf").onsubmit = (e) => { e.preventDefault(); H.qSearch = i.value; queueSearch(); };
+  $("#qRef").onclick = queueLoad;
+  el.querySelectorAll("[data-add]").forEach((b) => b.onclick = () => { b.disabled = true; queueAdd(b.dataset.add, b.dataset.title); });
 }
 
 // ============ Trivia ============

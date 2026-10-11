@@ -115,3 +115,15 @@ button.small, .btn.small { font-size: 13px; padding: 8px 12px; }
 .tabs5 button.sel { background: var(--accent); color: #111; border-color: var(--accent); }
 .tabs5 .live { position: absolute; top: 5px; right: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); box-shadow: 0 0 0 2px var(--panel-2); }
 .buzzer.blocked { font-size: 30px; }
+
+/* Juez manual */
+.judge { background: var(--panel-2); border: 2px solid var(--pumpkin); }
+.judge .answer { font-family: var(--display); font-size: 34px; font-weight: 900; line-height: 1.05; overflow-wrap: anywhere; }
+.judge button { padding: 16px; font-size: 18px; }
+.okbtn { background: var(--ok) !important; border-color: var(--ok) !important; color: #0c1f14 !important; }
+/* Cola */
+.trk { display: flex; align-items: center; gap: 10px; }
+.trk img { width: 40px; height: 40px; border-radius: 6px; flex: none; object-fit: cover; }
+.trk .t { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.trk .t strong, .trk .t span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.judge button { white-space: nowrap; }

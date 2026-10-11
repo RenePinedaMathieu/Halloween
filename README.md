@@ -2,7 +2,6 @@
 
 - `index.html` → lo que abren todos en el celular (eligen su nombre, ven su equipo, los puntajes y el juego en vivo).
 - `host.html` → tu panel (con PIN): controlas qué juego aparece, Spotify, trivia, disfraz, beerpong, caballos y puntajes.
-- `api/judge.js` → función de Vercel que usa Claude para decidir si la respuesta de la canción "calza".
 - `supabase.sql` → tablas, permisos, tiempo real y los 36 jugadores.
 
 ## 1. Supabase
@@ -13,7 +12,7 @@
 
 ## 2. Spotify (necesita Premium)
 1. developer.spotify.com/dashboard → Create app → marca **Web API**.
-2. Redirect URI: `https://TU-APP.vercel.app/host.html` (exacto, con `/host.html`).
+2. Redirect URI: `https://fiestahalloweern.vercel.app/host.html` (exacto, con `/host.html`).
 3. Copia el **Client ID**.
 4. En el modo de desarrollo, agrega tu correo de Spotify en *User Management*.
 
@@ -22,17 +21,18 @@ Edita el bloque de arriba de `shared.js`: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `
 También puedes cambiar `SONG_POINTS`, `ANSWER_SECONDS` y `RESUME_SECONDS` (cuánto se muestra el error antes de que la canción siga).
 
 ## 4. Vercel
-1. Sube la carpeta a un repo de GitHub e impórtalo en Vercel (Framework: Other, sin build).
-2. Settings → Environment Variables: `ANTHROPIC_API_KEY` = tu clave de console.anthropic.com.
-3. Deploy. Si la IA falla, el juego usa una comparación aproximada automática como respaldo.
+1. Sube el contenido de la carpeta a un repo de GitHub e impórtalo en Vercel (Framework: Other, sin build).
+2. Cada vez que cambias un archivo en GitHub, Vercel se actualiza solo.
 
 ## Cómo se juega
 
 **Canción:** pon "Canción" en los celulares y deja Spotify sonando en el parlante.
 "Siguiente canción y abrir" pasa la canción y abre el buzzer de todos. Cuando alguien aprieta, Spotify se pausa y **solo esa persona** tiene 10 s para escribir.
-Claude (`api/judge.js`) decide si calza: acepta faltas de ortografía, títulos sin "(feat.)", traducciones obvias y el coro conocido; no acepta solo el artista.
-Si acierta, suma el punto. Si falla o no alcanza, su equipo queda bloqueado en esa canción y la música sigue sola a los 3 s para los demás. Si fallan los 4 equipos, se revela la canción.
-Si Claude se equivoca, usa "Corregir".
+Su respuesta aparece en tu panel junto al nombre real de la canción: tú tocas **✓ Correcta** o **✗ Incorrecta**.
+Si es correcta, suma el punto. Si es incorrecta o no alcanza, su equipo queda bloqueado en esa canción y la música sigue sola a los 3 s para los demás. Si fallan los 4 equipos, se revela la canción.
+Si te equivocas, usa "Corregir".
+
+**Agregar canciones:** en el panel, busca por nombre o artista y toca "+ Cola". Suena después de la actual. "Siguiente canción" del juego también avanza la cola, así que arma la cola pensando en el juego.
 
 **Trivia:** escribe la pregunta y las alternativas, elige si es para un equipo o para todos y lánzala.
 Cada persona vota; la respuesta del equipo es la más votada (en empate gana la que se votó primero).
