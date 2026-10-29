@@ -133,7 +133,7 @@ function render() {
   if (f && f.tagName === "INPUT" && !f.disabled) { f.focus(); try { f.setSelectionRange(selPos, selPos); } catch {} }
 }
 
-const TABS = [["cancion", "Canción"], ["trivia", "Trivia"], ["disfraz", "Disfraz"], ["musica", "Música"], ["resultados", "Tabla"], ["equipo", "Equipo"]];
+const TABS = [["cancion", "Canción"], ["trivia", "Trivia"], ["disfraz", "Disfraz"], ["resultados", "Tabla"], ["equipo", "Equipo"]];
 // Pestaña que corresponde al juego en vivo
 function tabForGame(g) { return ["cancion", "trivia", "disfraz"].includes(g) ? g : "resultados"; }
 

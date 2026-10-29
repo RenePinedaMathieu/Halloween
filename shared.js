@@ -7,7 +7,7 @@ const CONFIG = {
   TRIVIA_HOST: "Rene",       // quien hace las preguntas de trivia (no vota)
   SONG_POINTS: 1,            // puntos por canción adivinada
   ANSWER_SECONDS: 10,
-  RESUME_SECONDS: 3,         // segundos que se muestra el error antes de que la canción siga
+  RESUME_SECONDS: 1,         // segundos entre marcar ✗ y que la música siga
 };
 // ============================
 
@@ -44,12 +44,23 @@ function toast(msg) {
 }
 
 // Escucha cambios en tablas y llama onChange(tabla)
+// window.RT_OK dice si la conexión en vivo está funcionando; si no, las páginas revisan cada pocos segundos
+window.RT_OK = false;
 function listen(tables, onChange) {
   const ch = db.channel("fiesta-" + Math.random().toString(36).slice(2));
   tables.forEach((t) => ch.on("postgres_changes", { event: "*", schema: "public", table: t }, (p) => onChange(t, p)));
-  ch.subscribe();
+  ch.subscribe((status) => { window.RT_OK = status === "SUBSCRIBED"; rtBadge(); });
+  rtBadge();
   return ch;
 }
+function rtBadge() {
+  let el = document.getElementById("rt");
+  if (!el) { el = document.createElement("div"); el.id = "rt"; document.body.appendChild(el); }
+  el.className = window.RT_OK ? "ok" : "off";
+  el.textContent = window.RT_OK ? "● en vivo" : "● revisando cada 2 s";
+}
+// Firma corta para saber si algo cambió sin redibujar de más
+const sig = (...xs) => JSON.stringify(xs);
 
 // ---------- Puntajes ----------
 function scoreTable(scores) {

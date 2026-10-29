@@ -65,8 +65,7 @@ async function boot() {
   await spotifyHandleRedirect();
   await loadAll();
   render();
-  listen(["scores", "matches", "buzzes", "song_answers", "trivia_votes", "costume_noms", "costume_ranks", "song_requests"], async (t, p) => {
-    if (t === "song_requests") return processRequests();
+  listen(["scores", "matches", "buzzes", "song_answers", "trivia_votes", "costume_noms", "costume_ranks"], async (t, p) => {
     if (t === "scores") H.scores = await q(db.from("scores").select("*").order("created_at", { ascending: false }));
     else if (t === "matches") H.matches = await q(db.from("matches").select("*").order("created_at"));
     else await loadGameData();
@@ -109,8 +108,6 @@ async function boot() {
   }, 3000);
 
   // Pedidos de canciones de los invitados: se revisan cada 2 s
-  processRequests();
-  setInterval(() => { if (!document.hidden) processRequests(); }, 2000);
 
   // Pantalla siempre encendida mientras el panel está abierto
   keepAwake();
@@ -140,8 +137,6 @@ function render() {
     <div class="card" id="p-mic"></div>
     <div class="grid-host">
       <div class="card" id="p-song"></div>
-      <div class="card" id="p-queue"></div>
-      <div class="card" id="p-req"></div>
       <div class="card" id="p-trivia"></div>
       <div class="card" id="p-costume"></div>
       <div class="card" id="p-scores"></div>
@@ -155,7 +150,7 @@ function render() {
     if (k === "disfraz") return setLive("disfraz", "idle", { candidates: ls.get("costume-cands", {}) });
     setLive(k, "idle", {});
   });
-  renderMic(); renderSong(); renderQueue(); renderRequests(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
+  renderMic(); renderSong(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
 }
 
 // ============ Spotify (PKCE, sin servidor) ============
@@ -290,11 +285,7 @@ function renderMic() {
 function songData() { return { round: 0, total: 10, attempt: 1, locked: [], ...(H.live.data || {}) }; }
 
 async function openSong(next) {
-  const contest = ls.get("pl-contest", null);
-  if (next && contest) {
-    const ok = await playContestNext();
-    if (!ok) return;
-  } else if (next) await spNext();
+  if (next) await spNext();   // pasa a la siguiente canción de lo que esté sonando en Spotify
   await refreshNowPlaying();
   if (!H.spotify) {   // nada cargado: intenta partir la reproducción
     await spPlay();
