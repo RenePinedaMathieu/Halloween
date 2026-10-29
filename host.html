@@ -123,13 +123,38 @@ async function keepAwake() {
   try { if (navigator.wakeLock && !(H.wake && !H.wake.released)) H.wake = await navigator.wakeLock.request("screen"); } catch {}
 }
 
+// ============ Partir de cero ============
+// Borra puntajes y resultados de todos los juegos. No toca los equipos ni los nombres elegidos.
+async function resetAll() {
+  try {
+    clearTimeout(H.answerTimeout); clearTimeout(H.autoResume);
+    await Promise.all([
+      q(db.from("scores").delete().neq("id", 0)),
+      q(db.from("buzzes").delete().neq("id", 0)),
+      q(db.from("song_answers").delete().neq("id", 0)),
+      q(db.from("matches").delete().neq("id", 0)),
+      q(db.from("trivia_votes").delete().neq("question_id", -1)),
+      q(db.from("costume_noms").delete().neq("player", "")),
+      q(db.from("costume_ranks").delete().neq("player", "")),
+    ]);
+    try { await db.from("song_requests").delete().neq("id", 0); } catch {}
+    ["song-round", "costume-cands", "bg-resume"].forEach((k) => ls.set(k, null));
+    Object.assign(H, { scores: [], matches: [], buzzes: [], answers: [], votes: [], noms: [], ranks: [], track: null, handling: false, lastSongScoreId: null, lastSongMatchId: null });
+    await setLive("none", "idle", {});
+    toast("Listo: todo en cero");
+  } catch (e) { toast("No se pudo borrar todo: " + (e.message || e)); render(); }
+}
+
 // ============ Render general ============
 function render() {
   const g = H.live.game;
   app.innerHTML = `
     <div class="row" style="justify-content:space-between">
       <div><span class="eyebrow">Panel del anfitrión</span><h1>Halloween</h1></div>
-      <a class="small muted" href="index.html" target="_blank">Abrir vista de jugadores ↗</a>
+      <div class="row">
+        <a class="small muted" href="index.html" target="_blank">Abrir vista de jugadores ↗</a>
+        <button class="small danger" id="resetAll">Partir de cero</button>
+      </div>
     </div>
     <div class="card"><h3>En los celulares ahora</h3>
       <div class="row">${[["none", "Nada"], ...Object.entries(GAMES).filter(([k]) => k !== "extra")]
@@ -150,6 +175,12 @@ function render() {
     if (k === "disfraz") return setLive("disfraz", "idle", { candidates: ls.get("costume-cands", {}) });
     setLive(k, "idle", {});
   });
+  const rb = $("#resetAll");
+  rb.onclick = async () => {
+    if (!rb.dataset.c) { rb.dataset.c = 1; rb.textContent = "¿Borrar todo? Toca otra vez"; setTimeout(() => { if (rb.isConnected) { delete rb.dataset.c; rb.textContent = "Partir de cero"; } }, 4000); return; }
+    rb.disabled = true; rb.textContent = "Borrando…";
+    await resetAll();
+  };
   renderMic(); renderSong(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
 }
 
