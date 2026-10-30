@@ -18,7 +18,7 @@ const S = {
   me: null, players: [], live: { game: "none", phase: "idle", data: {} },
   scores: [], buzzes: [], answers: [], votes: [], noms: [], ranks: [], matches: [],
   tab: "resultados", search: "", pending: null,
-  answerTimer: null, answerKey: null, answered: {}, draftRanks: {},
+  answerTimer: null, answerKey: null, answered: {}, draftRanks: {}, tAnswered: {},
   requests: [], reqQuery: "", reqId: null,
 };
 try { S.me = JSON.parse(localStorage.getItem("halloween-me")); } catch {}
@@ -27,7 +27,10 @@ const app = $("#app");
 
 // ---------- Carga de datos ----------
 async function loadPlayers() { S.players = await q(db.from("players").select("*").order("name")); }
-async function loadLive() { S.live = (await q(db.from("live_state").select("*").eq("id", 1)))[0] || S.live; }
+async function loadLive() {
+  S.live = (await q(db.from("live_state").select("*").eq("id", 1)))[0] || S.live;
+  triviaClock();   // parte el reloj de la trivia apenas llega la pregunta
+}
 async function loadScores() { S.scores = await q(db.from("scores").select("*")); }
 async function loadRequests() {
   const all = await q(db.from("song_requests").select("*").order("id"));
@@ -60,6 +63,7 @@ async function init() {
     if (t === "live_state") {
       const prev = S.live.game;
       await loadLive(); await loadRoundData();
+      if (S.live.game === "trivia" && S.live.phase === "reveal") await loadMatches();   // trae los puntos de la pregunta
       const ld = S.live.data || {};
       const needsMe = ["playing", "open", "nominar", "votar"].includes(S.live.phase) || (S.live.phase === "answering" && ld.team === S.me?.team);
       if ((S.live.game !== prev && S.live.game !== "none") || needsMe) S.tab = tabForGame(S.live.game);   // salta solo al juego que necesita al jugador
@@ -86,6 +90,14 @@ async function init() {
       if (s !== lastSig) { lastSig = s; if (S.me) render(); }
     } catch {}
   }, 2000);
+  // Cuenta regresiva de la trivia: solo mueve el número y la barra; al llegar a 0 redibuja una vez
+  setInterval(() => {
+    const c = triviaClock(), n = $("#tCount");
+    if (!c || !n) return;
+    n.textContent = Math.ceil(c.left / 1000);
+    $("#tBar").style.width = (100 * c.left) / (S.live.data.secs * 1000) + "%";
+    if (c.left <= 0) render();
+  }, 200);
   // Al volver a la app después de bloquear el celular, se pone al día
   document.addEventListener("visibilitychange", () => { if (!document.hidden) handle("live_state"); });
 }
@@ -183,11 +195,11 @@ function songHistory() {
   return `<ul class="list">${items.map((m) => `<li><span>${m.data.round}. <strong>${esc(m.data.title)}</strong> <span class="muted small">${esc(m.data.artist || "")}</span></span>${teamChip(m.data.team)}</li>`).join("")}</ul>`;
 }
 function triviaHistory() {
-  const items = byGame("trivia"), L = "ABCDEF";
+  const items = byGame("trivia").filter((m) => m.data.answers);
   if (!items.length) return `<p class="muted small">Aún no hay preguntas respondidas.</p>`;
-  return `<ul class="list">${items.map((m) => `<li style="flex-direction:column;align-items:stretch">
-    <span><strong>${esc(m.data.question)}</strong><br><span class="small muted">Correcta: ${L[m.data.correct]}. ${esc(m.data.options[m.data.correct])}</span></span>
-    <span class="row">${Object.entries(m.data.teamAnswers).map(([t, a]) => `<span class="small">${teamChip(t)} <strong style="color:var(${a === m.data.correct ? "--ok" : "--bad"})">${a == null ? "–" : L[a]}</strong></span>`).join("")}</span></li>`).join("")}</ul>`;
+  return `<ul class="list">${items.map((m) => `<li>
+    <span><strong>${esc(m.data.question)}</strong><br><span class="small muted">${OPTS[m.data.correct].shape} ${esc(m.data.options[m.data.correct])}</span></span>
+    <span class="small muted" style="white-space:nowrap">${m.data.answers.filter((a) => a.pts > 0).length}/${m.data.answers.length} acertaron</span></li>`).join("")}</ul>`;
 }
 function costumeTable(r, cands) {
   const order = [1, 2, 3, 4].sort((a, b) => r[b].total - r[a].total);
@@ -200,7 +212,7 @@ function renderResults() {
     <div class="card"><span class="eyebrow">General</span><h2>Tabla de puntajes</h2>${renderScoreboard(S.scores)}</div>
     <div class="card"><h3>Beerpong</h3>${beer.length ? `<ul class="list">${beer.map((m) => `<li><span>${esc(m.data.stage)}</span><span>${teamChip(m.data.a)} vs ${teamChip(m.data.b)}</span><span class="small">gana ${teamChip(m.data.winner)}</span></li>`).join("")}</ul>` : `<p class="muted small">Aún no hay partidos.</p>`}</div>
     <div class="card"><h3>Adivina la canción</h3>${songHistory()}</div>
-    <div class="card"><h3>Trivia</h3>${triviaHistory()}</div>
+    <div class="card"><span class="eyebrow">Trivia</span>${renderTriviaBoard(triviaStandings(S.matches), S.me.name, 5)}</div>
     <div class="card"><h3>Mejor disfraz</h3>${cost ? costumeTable(cost.data.results, cost.data.candidates) : `<p class="muted small">Todavía no se vota.</p>`}</div>
     <div class="card"><h3>Carrera de caballos</h3>${horse.length ? `<ul class="list">${horse.map((m, i) => `<li><span>Carrera ${i + 1}</span><span>${m.data.order.map((t, j) => `${j + 1}º ${teamChip(t)}`).join(" ")}</span></li>`).join("")}</ul>` : `<p class="muted small">Aún no hay carreras.</p>`}</div>`;
 }
@@ -341,38 +353,76 @@ function renderSong(body) {
     <div class="card"><h3>Canciones adivinadas</h3>${songHistory()}</div>`;
 }
 
-// ---------- Trivia ----------
+// ---------- Trivia (estilo Kahoot) ----------
+// Cada celular mide su tiempo desde que le llegó la pregunta, así no importa si los relojes de los teléfonos no calzan.
+// Se guarda en el teléfono para que recargar la página no reinicie el reloj.
+function triviaClock() {
+  const d = S.live.data || {};
+  if (S.live.game !== "trivia" || S.live.phase !== "open" || !d.qid) return null;
+  let seen = null;
+  try { seen = JSON.parse(localStorage.getItem("trivia-seen")); } catch {}
+  if (seen?.qid !== d.qid) { seen = { qid: d.qid, at: Date.now() }; try { localStorage.setItem("trivia-seen", JSON.stringify(seen)); } catch {} }
+  const ms = Date.now() - seen.at;
+  return { ms, left: Math.max(0, d.secs * 1000 - ms) };
+}
+
 function renderTrivia(body) {
   const on = S.live.game === "trivia";
-  const d = on ? S.live.data || {} : {}, ph = S.live.phase, myT = S.me.team;
-  const hist = `<div class="card"><h3>Preguntas anteriores</h3>${triviaHistory()}</div>`;
-  if (!d.qid) { body.innerHTML = `<div class="card"><span class="eyebrow">Trivia</span><h2>Esperando la pregunta</h2><p class="muted">Cuando Rene lance una pregunta, las alternativas aparecen aquí para votar.</p></div>${hist}`; return; }
+  const d = on ? S.live.data || {} : {}, ph = S.live.phase;
+  const st = triviaStandings(S.matches);
+  const board = `<div class="card"><span class="eyebrow">Tabla de la trivia · ${st.questions} ${st.questions === 1 ? "pregunta" : "preguntas"}</span>${renderTriviaBoard(st, S.me.name)}</div>
+    <div class="card"><h3>Preguntas anteriores</h3>${triviaHistory()}</div>`;
+  if (!d.qid) {
+    body.innerHTML = `<div class="card"><span class="eyebrow">Trivia</span><h2>Esperando la pregunta</h2>
+      <p class="muted">Cuando ${esc(CONFIG.TRIVIA_HOST)} lance una pregunta aparece aquí. Cada uno responde en su celular: mientras más rápido aciertes, más puntos.</p></div>${board}`;
+    return;
+  }
   const isHost = S.me.name === CONFIG.TRIVIA_HOST;
-  const forMe = !isHost && (!d.target || d.target === myT);
-  const tally = triviaTally(S.votes);
   const mine = S.votes.find((v) => v.player === S.me.name);
-  const L = "ABCDEF";
-  const t = tally[myT];
+  const my = S.tAnswered[d.qid] || (mine && { option: mine.option, ms: Date.parse(mine.updated_at) - d.qid });
+  const clock = triviaClock();
   const reveal = ph === "reveal" ? d.reveal : null;
+  const canAnswer = !isHost && !my && clock && clock.left > 0;
 
-  body.innerHTML = `<div class="card" style="--c:${TEAMS[myT].color}">
-    <span class="eyebrow">Trivia ${d.target ? "· para el " + TEAMS[d.target].name : "· todos los equipos"}</span>
+  let status = "";
+  if (reveal) {
+    const a = S.matches.find((m) => m.game === "trivia" && m.data.qid === d.qid)?.data.answers.find((x) => x.player === S.me.name);
+    const rank = st.people.findIndex((p) => p.name === S.me.name);
+    status = isHost ? "" : `<div class="verdict ${my?.option === reveal.correct ? "ok" : "no"}">${!my ? "No respondiste" : my.option === reveal.correct ? "¡Correcto!" : "Incorrecto"}</div>
+      ${a?.pts ? `<div class="countdown" style="font-size:56px">+${fmtPts(a.pts)}</div>` : ""}
+      ${rank >= 0 ? `<p style="text-align:center">Vas <strong>${rank + 1}º</strong> de ${st.people.length} con <strong>${fmtPts(st.people[rank].pts)}</strong> puntos</p>` : ""}`;
+  } else if (clock && clock.left > 0) {
+    status = `<div class="countdown" id="tCount">${Math.ceil(clock.left / 1000)}</div>
+      <div class="bar"><i id="tBar" style="width:${(100 * clock.left) / (d.secs * 1000)}%"></i></div>`;
+  } else if (ph === "open") {
+    status = `<div class="verdict">Se acabó el tiempo</div>`;
+  }
+  const note = isHost ? `<p class="muted">Tú haces las preguntas, así que no respondes.</p>`
+    : reveal ? "" : my ? `<p class="muted" style="text-align:center">Respondiste en ${(my.ms / 1000).toFixed(1).replace(".", ",")} s. Espera el resultado…</p>`
+    : canAnswer ? `<p class="small muted" style="text-align:center">Una sola oportunidad: lo primero que toques queda.</p>` : "";
+
+  body.innerHTML = `<div class="card">
+    <span class="eyebrow">Pregunta ${d.n || ""}${d.mult > 1 ? " · ¡Puntaje doble!" : ""} · ${S.votes.length} ${S.votes.length === 1 ? "respondió" : "respondieron"}</span>
     <h2 style="text-transform:none;font-size:30px">${esc(d.question)}</h2>
-    <div class="options">${d.options.map((o, i) => {
-      const n = t.counts[i] || 0;
-      const isCorrect = reveal && reveal.correct === i;
-      return `<button data-opt="${i}" class="${isCorrect ? "correct" : mine?.option === i ? "sel" : ""}" ${!forMe || ph !== "open" ? "disabled" : ""}>
-        <span><strong>${L[i]}.</strong> ${esc(o)}</span>${forMe ? `<span class="small">${n || ""}</span>` : ""}</button>`;
+    ${status}
+    <div class="kahoot">${d.options.map((o, i) => {
+      const cls = reveal ? (i === reveal.correct ? "correct" : "dim") : my ? (i === my.option ? "sel" : "dim") : ph === "open" && !canAnswer && !isHost ? "dim" : "";
+      return `<button data-opt="${i}" class="${cls}" style="--o:${OPTS[i].color}" ${canAnswer ? "" : "disabled"}>
+        <span class="shape">${OPTS[i].shape}</span><span class="txt">${esc(o)}</span>
+        <span class="tags">${my?.option === i ? `<span class="tag">tú</span>` : ""}${reveal ? `<span class="tag">${i === reveal.correct ? "✓ " : ""}${reveal.counts[i]}</span>` : ""}</span></button>`;
     }).join("")}</div>
-    ${forMe && ph === "open" ? `<p class="small muted">Gana la alternativa con más votos de tu equipo. Puedes cambiar tu voto hasta que se cierre.</p>
-      <p>Tu equipo va por: <strong>${t.answer != null ? L[t.answer] : "—"}</strong> <span class="muted small">(${t.total} de ${S.players.filter((p) => p.team === myT && p.name !== CONFIG.TRIVIA_HOST).length} votaron)</span></p>` : ""}
-    ${isHost ? `<p class="muted">Tú haces las preguntas, así que no votas. Maneja la trivia desde el Panel anfitrión.</p>` : !forMe ? `<p class="muted">Esta pregunta es para otro equipo. Mira cómo les va.</p>` : ""}
-    ${ph === "closed" ? `<p class="muted">Votación cerrada. Esperando la respuesta correcta…</p>` : ""}
-    ${reveal ? `<div class="list">${Object.entries(reveal.teamAnswers).map(([tm, a]) =>
-      `<li>${teamChip(tm)} <span>${a == null ? "Sin respuesta" : L[a]}</span> <strong style="color:var(${a === reveal.correct ? "--ok" : "--bad"})">${a === reveal.correct ? "✓" : "✗"}</strong></li>`).join("")}</div>` : ""}
-  </div>${hist}`;
+    ${note}
+  </div>${board}`;
   body.querySelectorAll("[data-opt]").forEach((b) => b.onclick = async () => {
-    await q(db.from("trivia_votes").upsert({ question_id: d.qid, player: S.me.name, team: myT, option: Number(b.dataset.opt), updated_at: new Date().toISOString() }));
+    const c = triviaClock();
+    if (!c || c.left <= 0 || S.tAnswered[d.qid]) return;
+    const option = Number(b.dataset.opt);
+    S.tAnswered[d.qid] = { option, ms: c.ms };
+    if (navigator.vibrate) navigator.vibrate(60);
+    render();
+    // updated_at guarda qid + lo que tardó (medido en este celular); así la tabla no necesita una columna nueva
+    try { await q(db.from("trivia_votes").insert({ question_id: d.qid, player: S.me.name, team: S.me.team, option, updated_at: new Date(d.qid + c.ms).toISOString() })); }
+    catch { delete S.tAnswered[d.qid]; render(); }
   });
 }
 

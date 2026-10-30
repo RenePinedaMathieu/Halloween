@@ -18,7 +18,7 @@
 
 ## 3. Configuración
 Edita el bloque de arriba de `shared.js`: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SPOTIFY_CLIENT_ID` y `HOST_PIN` (clave del panel, hoy 1234) y `TRIVIA_HOST` (quien hace las preguntas y no vota; hoy Rene).
-También puedes cambiar `SONG_POINTS`, `ANSWER_SECONDS` y `RESUME_SECONDS` (cuánto se muestra el error antes de que la canción siga).
+También puedes cambiar `SONG_POINTS`, `TRIVIA_POINTS`, `TRIVIA_GRACE`, `ANSWER_SECONDS` y `RESUME_SECONDS` (cuánto se muestra el error antes de que la canción siga).
 
 ## 4. Vercel
 1. Sube el contenido de la carpeta a un repo de GitHub e impórtalo en Vercel (Framework: Other, sin build).
@@ -34,9 +34,13 @@ Si te equivocas, usa "Corregir".
 
 **Agregar canciones:** en el panel, busca por nombre o artista y toca "+ Cola". Suena después de la actual. "Siguiente canción" del juego también avanza la cola, así que arma la cola pensando en el juego.
 
-**Trivia:** escribe la pregunta y las alternativas, elige si es para un equipo o para todos y lánzala.
-Cada persona vota; la respuesta del equipo es la más votada (en empate gana la que se votó primero).
-Cierra la votación, toca la correcta y se suman los puntos solos.
+**Trivia (estilo Kahoot):** escribe la pregunta y las alternativas, marca la correcta con el círculo, elige el tiempo (y si vale doble) y lánzala.
+Cada persona responde en su celular, una sola vez: acertar vale de 1000 (al instante) a 500 (al último segundo); fallar o no responder, 0.
+Cuando se acaba el tiempo (más 2 s de gracia) se revela sola, o antes con "Revelar ahora". Los celulares muestran si acertaste, tus puntos y la tabla de equipos y jugadores.
+El puntaje del equipo es el **promedio por jugador**: la suma del equipo dividida por cuántos de ellos han respondido alguna pregunta, así no gana el equipo con más gente.
+En la tabla general entra solo como "Trivia (automático)": promedio / 1000, o sea un equipo perfecto suma 1 punto por pregunta (`TRIVIA_POINTS` en `shared.js`).
+Si marcaste mal la correcta, abre "¿Marcaste mal la correcta?" y toca la que era: todo se recalcula.
+La correcta queda guardada solo en el aparato que lanzó la pregunta; si revelas desde otro, te pide tocarla.
 
 **Mejor disfraz:** 1) nominación: cada uno elige a alguien de su equipo. 2) cierras y queda el más votado por equipo.
 3) votación: cada persona ordena los 3 disfraces de los otros equipos en dificultad, calidad y referencia.

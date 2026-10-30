@@ -21,7 +21,6 @@ const H = {
   spotify: null,
 };
 const app = $("#app");
-const L = "ABCDEF";
 const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
              set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
 
@@ -73,12 +72,21 @@ async function boot() {
     if (t === "song_answers" && p.eventType === "INSERT") await onAnswer(p.new);
     // Solo se redibuja el panel afectado, para no interrumpir lo que estés escribiendo
     if (t === "scores") renderScores();
-    else if (t === "matches") { renderBeer(); renderHorse(); }
+    else if (t === "matches") { renderBeer(); renderHorse(); renderTriviaLive(); }
     else if (t === "trivia_votes") renderTriviaLive();
     else if (t.startsWith("costume")) renderCostume();
     else renderSong();
   });
   setInterval(refreshNowPlaying, 5000);
+
+  // Trivia: cuenta regresiva y revelado automático al acabarse el tiempo (más unos segundos de gracia)
+  setInterval(() => {
+    if (H.live.game !== "trivia" || H.live.phase !== "open") return;
+    const d = H.live.data, left = d.qid + d.secs * 1000 - Date.now();
+    const el = $("#tTimer"); if (el) el.textContent = Math.max(0, Math.ceil(left / 1000));
+    const key = ls.get("trivia-key", {});
+    if (left <= -CONFIG.TRIVIA_GRACE * 1000 && key?.qid === d.qid) triviaReveal(key.correct);
+  }, 500);
 
   // Respaldo: aunque falle la conexión en vivo, el panel revisa el buzzer cada segundo
   let lastSig = "";
@@ -681,62 +689,103 @@ function renderRequests() {
 }
 
 // ============ Trivia ============
+// La trivia entra a la tabla general como una fila por equipo que se reemplaza en cada pregunta:
+// promedio por jugador / 1000 × TRIVIA_POINTS (un equipo que acierta entero y al instante suma TRIVIA_POINTS por pregunta)
+const TRIVIA_NOTE = "Trivia (automático)";
+async function syncTriviaScores() {
+  const st = triviaStandings(H.matches);
+  await q(db.from("scores").delete().eq("game", "trivia").eq("note", TRIVIA_NOTE));
+  const rows = [1, 2, 3, 4].filter((t) => st.teams[t].avg > 0)
+    .map((t) => ({ team: t, game: "trivia", points: Math.round(st.teams[t].avg * CONFIG.TRIVIA_POINTS) / 1000, note: TRIVIA_NOTE }));
+  if (rows.length) await q(db.from("scores").insert(rows));
+}
+
+// Calcula los puntos de cada uno, guarda la pregunta y la muestra en los celulares. También sirve para corregir la correcta.
+async function triviaReveal(correct) {
+  if (H.revealing) return;
+  H.revealing = true;
+  try {
+    const d = H.live.data;
+    H.votes = await q(db.from("trivia_votes").select("*").eq("question_id", d.qid));
+    const answers = H.votes.filter((v) => v.player !== CONFIG.TRIVIA_HOST).map((v) => {
+      const ms = Date.parse(v.updated_at) - d.qid;   // el celular guarda qid + lo que tardó
+      return { player: v.player, team: v.team, option: v.option, ms, pts: v.option === correct ? kahootPoints(ms, d.secs, d.mult) : 0 };
+    });
+    const counts = d.options.map((_, i) => answers.filter((a) => a.option === i).length);
+    await q(db.from("matches").delete().eq("game", "trivia").eq("data->>qid", String(d.qid)));
+    await q(db.from("matches").insert({ game: "trivia", data: { qid: d.qid, question: d.question, options: d.options, correct, mult: d.mult, answers } }));
+    H.matches = await q(db.from("matches").select("*").order("created_at"));
+    await syncTriviaScores();
+    await setLive("trivia", "reveal", { ...d, reveal: { correct, counts } });
+  } finally { H.revealing = false; }
+}
+
 function renderTriviaLive() {
   const box = $("#tLive"); if (!box) return;
-  const live = H.live.game === "trivia" ? H.live : null;
-  const d = live?.data || {};
+  const on = H.live.game === "trivia", d = on ? H.live.data || {} : {}, ph = H.live.phase;
+  const pick = (label) => `<p class="small muted">${label}</p><div class="grid2">${(d.options || []).map((o, i) =>
+    `<button data-correct="${i}" style="border-left:6px solid ${OPTS[i].color}">${OPTS[i].shape} ${esc(o)}</button>`).join("")}</div>`;
   let liveHtml = "";
-  if (d.qid) {
-    const tally = triviaTally(H.votes);
-    const teams = d.target ? [d.target] : [1, 2, 3, 4];
+  if (d.qid && ph === "open") {
+    const key = ls.get("trivia-key", {}), known = key?.qid === d.qid;
+    const left = Math.max(0, Math.ceil((d.qid + d.secs * 1000 - Date.now()) / 1000));
     liveHtml = `<div class="card" style="background:var(--panel-2)">
-      <span class="eyebrow">${{ open: "Votando", closed: "Cerrada", reveal: "Revelada" }[live.phase] || ""}</span>
-      <strong>${esc(d.question)}</strong>
-      <ul class="list">${teams.map((t) => {
-        const x = tally[t], size = H.players.filter((p) => p.team === t && p.name !== CONFIG.TRIVIA_HOST).length;
-        return `<li>${teamChip(t)} <span>${x.answer != null ? L[x.answer] + " · " + esc(d.options[x.answer]) : "—"}</span><span class="small muted">${x.total}/${size}</span></li>`;
-      }).join("")}</ul>
-      ${live.phase === "open" ? `<button id="tClose">Cerrar votación</button>` : ""}
-      ${live.phase === "closed" ? `<p class="small muted">¿Cuál era la correcta?</p><div class="grid2">${d.options.map((o, i) => `<button data-correct="${i}">${L[i]}. ${esc(o)}</button>`).join("")}</div>` : ""}
+      <span class="eyebrow">Pregunta ${d.n}${d.mult > 1 ? " · doble" : ""} · respondiendo</span><strong>${esc(d.question)}</strong>
+      <div class="countdown" id="tTimer">${left}</div>
+      <p style="text-align:center"><strong>${H.votes.length}</strong> ${H.votes.length === 1 ? "respuesta" : "respuestas"}</p>
+      ${known ? `<p class="small muted">Correcta: ${OPTS[key.correct].shape} ${esc(d.options[key.correct])}. Se revela sola cuando se acaba el tiempo.</p>
+        <button id="tNow">Revelar ahora</button>`
+      : pick("Este aparato no sabe cuál es la correcta (la pregunta se lanzó desde otro). Tócala para revelar:")}
+    </div>`;
+  } else if (d.qid && ph === "reveal") {
+    const r = d.reveal;
+    liveHtml = `<div class="card" style="background:var(--panel-2)">
+      <span class="eyebrow">Pregunta ${d.n} · revelada</span><strong>${esc(d.question)}</strong>
+      <ul class="list">${d.options.map((o, i) => `<li style="${i === r.correct ? "outline:2px solid var(--ok)" : ""}"><span>${OPTS[i].shape} ${esc(o)}</span><strong>${r.counts[i]}</strong></li>`).join("")}</ul>
+      <details><summary class="small muted">¿Marcaste mal la correcta?</summary>${pick("Toca la que era; los puntos se recalculan.")}</details>
     </div>`;
   }
-  box.innerHTML = liveHtml;
-  $("#tClose") && ($("#tClose").onclick = () => setLive("trivia", "closed", d));
-  box.querySelectorAll("[data-correct]").forEach((b) => b.onclick = async () => {
-    const correct = Number(b.dataset.correct);
-    const tally = triviaTally(H.votes);
-    const teams = d.target ? [d.target] : [1, 2, 3, 4];
-    const teamAnswers = {};
-    for (const t of teams) {
-      teamAnswers[t] = tally[t].answer;
-      if (tally[t].answer === correct && d.pts) await q(db.from("scores").insert({ team: t, game: "trivia", points: d.pts, note: d.question }));
-    }
-    await q(db.from("matches").insert({ game: "trivia", data: { question: d.question, options: d.options, correct, teamAnswers } }));
-    await setLive("trivia", "reveal", { ...d, reveal: { correct, teamAnswers } });
-  });
+  box.innerHTML = liveHtml + renderTriviaBoard(triviaStandings(H.matches), null);
+  $("#tNow") && ($("#tNow").onclick = () => triviaReveal(ls.get("trivia-key").correct));
+  box.querySelectorAll("[data-correct]").forEach((b) => b.onclick = () => triviaReveal(Number(b.dataset.correct)));
 }
 
 function renderTrivia() {
   const el = $("#p-trivia");
-  const draft = ls.get("trivia-draft", { q: "", o: ["", "", "", ""], target: 0, pts: 1 });
-  el.innerHTML = `<h2>Trivia</h2><div id="tLive"></div>
+  const draft = ls.get("trivia-draft", { q: "", o: ["", "", "", ""], correct: null, secs: 20, double: false });
+  const open = H.live.game === "trivia" && H.live.phase === "open";
+  el.innerHTML = `<h2>Trivia</h2><div id="tLive" style="display:flex;flex-direction:column;gap:12px"></div>
     <form id="tf" style="display:flex;flex-direction:column;gap:8px">
-      <label>Para<select id="tTarget"><option value="0">Todos los equipos</option>${[1, 2, 3, 4].map((t) => `<option value="${t}" ${draft.target == t ? "selected" : ""}>Equipo ${t}</option>`).join("")}</select></label>
+      <h3>Nueva pregunta</h3>
       <label>Pregunta<input id="tQ" value="${esc(draft.q)}"></label>
-      ${[0, 1, 2, 3].map((i) => `<label>${L[i]}<input class="tO" data-i="${i}" value="${esc(draft.o[i])}"></label>`).join("")}
-      <label>Puntos por acierto<input id="tPts" type="number" step="0.5" value="${draft.pts}" style="width:90px"></label>
-      <button class="primary">Lanzar pregunta</button>
+      <p class="small muted">Marca la correcta con el círculo.</p>
+      ${[0, 1, 2, 3].map((i) => `<div class="row tOpt" style="--o:${OPTS[i].color}">
+        <input type="radio" name="tC" value="${i}" ${draft.correct === i ? "checked" : ""} aria-label="Correcta ${OPTS[i].shape}">
+        <span class="shape">${OPTS[i].shape}</span><input class="tO" data-i="${i}" value="${esc(draft.o[i])}"></div>`).join("")}
+      <div class="row">
+        <label>Tiempo<select id="tSecs">${[10, 20, 30, 60].map((s) => `<option value="${s}" ${draft.secs == s ? "selected" : ""}>${s} s</option>`).join("")}</select></label>
+        <label style="flex-direction:row;align-items:center;gap:8px;align-self:flex-end"><input type="checkbox" id="tDouble" ${draft.double ? "checked" : ""}> Puntaje doble</label>
+      </div>
+      <button class="primary" ${open ? "disabled" : ""}>${open ? "Hay una pregunta en curso" : "Lanzar pregunta"}</button>
     </form>`;
-  const save = () => ls.set("trivia-draft", { q: $("#tQ").value, o: [...el.querySelectorAll(".tO")].map((x) => x.value), target: Number($("#tTarget").value), pts: Number($("#tPts").value) });
-  el.querySelectorAll("input,select").forEach((x) => x.oninput = save);
+  const save = () => {
+    const c = el.querySelector("[name=tC]:checked");
+    ls.set("trivia-draft", { q: $("#tQ").value, o: [...el.querySelectorAll(".tO")].map((x) => x.value), correct: c ? Number(c.value) : null, secs: Number($("#tSecs").value), double: $("#tDouble").checked });
+  };
+  el.querySelectorAll("input,select").forEach((x) => { x.oninput = save; x.onchange = save; });
   $("#tf").onsubmit = async (e) => {
     e.preventDefault(); save();
     const dr = ls.get("trivia-draft");
-    const options = dr.o.map((s) => s.trim()).filter(Boolean);
-    if (!dr.q.trim() || options.length < 2) return toast("Escribe la pregunta y al menos 2 alternativas");
+    const filled = dr.o.map((s, i) => ({ s: s.trim(), i })).filter((x) => x.s);
+    const correct = filled.findIndex((x) => x.i === dr.correct);
+    if (!dr.q.trim() || filled.length < 2) return toast("Escribe la pregunta y al menos 2 alternativas");
+    if (correct < 0) return toast("Marca cuál es la correcta");
+    const qid = Date.now();
+    ls.set("trivia-key", { qid, correct });   // la correcta queda solo en este panel hasta revelar
     H.votes = [];
-    await setLive("trivia", "open", { qid: Date.now(), question: dr.q.trim(), options, target: dr.target, pts: dr.pts });
-    ls.set("trivia-draft", { q: "", o: ["", "", "", ""], target: dr.target, pts: dr.pts });
+    const n = H.matches.filter((m) => m.game === "trivia" && m.data.answers).length + 1;
+    await setLive("trivia", "open", { qid, n, question: dr.q.trim(), options: filled.map((x) => x.s), secs: dr.secs, mult: dr.double ? 2 : 1 });
+    ls.set("trivia-draft", { q: "", o: ["", "", "", ""], correct: null, secs: dr.secs, double: false });
     render();
   };
   renderTriviaLive();

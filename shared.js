@@ -6,6 +6,8 @@ const CONFIG = {
   HOST_PIN: "1234",          // clave del panel del anfitrión
   TRIVIA_HOST: "Rene",       // quien hace las preguntas de trivia (no vota)
   SONG_POINTS: 1,            // puntos por canción adivinada
+  TRIVIA_POINTS: 1,          // puntos de la tabla general por pregunta de trivia (si todo el equipo acierta al instante)
+  TRIVIA_GRACE: 2,           // segundos extra antes de revelar, por si algún celular recibió la pregunta tarde
   ANSWER_SECONDS: 10,
   RESUME_SECONDS: 1,         // segundos entre marcar ✗ y que la música siga
 };
@@ -83,22 +85,46 @@ function renderScoreboard(scores) {
       <td class="total">${fmt(rows[t].total) === "–" ? 0 : fmt(rows[t].total)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
-// ---------- Trivia: respuesta del equipo = la más votada (empate: gana la que tenga el voto más antiguo) ----------
-function triviaTally(votes) {
-  const res = {};
-  for (const t of [1, 2, 3, 4]) {
-    const tv = votes.filter((v) => v.team === t);
-    const counts = {}, first = {};
-    for (const v of tv) {
-      counts[v.option] = (counts[v.option] || 0) + 1;
-      const ts = new Date(v.updated_at).getTime();
-      if (first[v.option] == null || ts < first[v.option]) first[v.option] = ts;
-    }
-    const opts = Object.keys(counts).map(Number);
-    opts.sort((a, b) => counts[b] - counts[a] || first[a] - first[b]);
-    res[t] = { counts, total: tv.length, answer: opts.length ? opts[0] : null };
+// ---------- Trivia estilo Kahoot: cada uno responde en su celular ----------
+const OPTS = [
+  { shape: "▲", color: "#f2873f" }, { shape: "◆", color: "#3fb8c9" },
+  { shape: "●", color: "#e8c547" }, { shape: "■", color: "#e06fb0" },
+];
+// Acertar vale de 1000 (al instante) a 500 (al último segundo); el doble si la pregunta es doble. Fallar o no responder = 0.
+function kahootPoints(ms, secs, mult = 1) {
+  const t = Math.min(Math.max(ms / (secs * 1000), 0), 1);
+  return Math.round(1000 * (1 - t / 2)) * mult;
+}
+// Tabla de la trivia a partir de las preguntas reveladas (matches de trivia con data.answers).
+// El equipo vale el promedio por jugador: su suma dividida por cuántos de ellos han respondido alguna pregunta,
+// así un equipo con más gente no gana solo por ser más.
+function triviaStandings(matches) {
+  const qs = matches.filter((m) => m.game === "trivia" && m.data.answers);
+  const ind = {};
+  for (const m of qs) for (const a of m.data.answers) {
+    const p = (ind[a.player] ??= { name: a.player, team: a.team, pts: 0, ok: 0 });
+    p.pts += a.pts; if (a.pts > 0) p.ok++;
   }
-  return res;
+  const people = Object.values(ind).sort((a, b) => b.pts - a.pts || b.ok - a.ok);
+  const teams = {};
+  for (const t of [1, 2, 3, 4]) {
+    const ps = people.filter((p) => p.team === t), sum = ps.reduce((s, p) => s + p.pts, 0);
+    teams[t] = { sum, n: ps.length, avg: ps.length ? sum / ps.length : 0 };
+  }
+  return { questions: qs.length, people, teams };
+}
+const fmtPts = (n) => Math.round(n).toLocaleString("es-CL");
+function renderTriviaBoard(st, me, top = 10) {
+  if (!st.questions) return `<p class="muted small">Aún no hay preguntas reveladas.</p>`;
+  const order = [1, 2, 3, 4].sort((a, b) => st.teams[b].avg - st.teams[a].avg);
+  const mi = st.people.findIndex((p) => p.name === me);
+  const row = (p, i) => `<li class="${p.name === me ? "self" : ""}"><span><span class="pos">${i + 1}º</span> ${teamChip(p.team)} ${esc(p.name)}</span><strong>${fmtPts(p.pts)}</strong></li>`;
+  return `<h3>Equipos</h3>
+    <ul class="list">${order.map((t, i) => `<li><span><span class="pos">${i + 1}º</span> ${teamChip(t)}</span>
+      <span class="small muted" style="flex:1">${st.teams[t].n ? `${fmtPts(st.teams[t].sum)} entre ${st.teams[t].n}` : "sin respuestas"}</span><strong>${fmtPts(st.teams[t].avg)}</strong></li>`).join("")}</ul>
+    <p class="small muted">El puntaje del equipo es el promedio por jugador (la suma dividida por cuántos han respondido), para que no gane el equipo con más gente.</p>
+    <h3>Jugadores</h3>
+    <ul class="list">${st.people.slice(0, top).map(row).join("")}${mi >= top ? `<li class="small muted" style="justify-content:center">…</li>${row(st.people[mi], mi)}` : ""}</ul>`;
 }
 
 // ---------- Disfraz ----------
