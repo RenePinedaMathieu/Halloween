@@ -143,22 +143,24 @@ function costumeCandidates(noms) {
   }
   return out;
 }
-// Puntaje Borda: 1º = 3, 2º = 2, 3º = 1. Se promedia por cantidad de votantes.
+// Puntaje Borda: 1º = 3, 2º = 2, 3º = 1. Primero se promedia dentro de cada equipo que vota y después entre esos equipos,
+// así cada equipo pesa lo mismo en la nota de los demás aunque tenga más gente.
 function costumeResults(ranks) {
-  const sum = {}, n = {};
-  for (const t of [1, 2, 3, 4]) { sum[t] = {}; n[t] = {}; CATEGORIES.forEach((c) => { sum[t][c] = 0; n[t][c] = 0; }); }
+  const sum = {}, n = {};   // sum[equipo votado][categoría][equipo que vota]
+  for (const t of [1, 2, 3, 4]) { sum[t] = {}; n[t] = {}; CATEGORIES.forEach((c) => { sum[t][c] = {}; n[t][c] = {}; }); }
   for (const r of ranks) {
     r.ranking.forEach((team, i) => {
-      if (!sum[team]) return;
-      sum[team][r.category] += 3 - i;
-      n[team][r.category] += 1;
+      if (!sum[team]?.[r.category]) return;
+      sum[team][r.category][r.team] = (sum[team][r.category][r.team] || 0) + 3 - i;
+      n[team][r.category][r.team] = (n[team][r.category][r.team] || 0) + 1;
     });
   }
   const res = {};
   for (const t of [1, 2, 3, 4]) {
     res[t] = { total: 0 };
     for (const c of CATEGORIES) {
-      res[t][c] = n[t][c] ? sum[t][c] / n[t][c] : 0;
+      const avgs = Object.keys(n[t][c]).map((v) => sum[t][c][v] / n[t][c][v]);
+      res[t][c] = avgs.length ? avgs.reduce((a, b) => a + b, 0) / avgs.length : 0;
       res[t].total += res[t][c];
     }
   }

@@ -44,7 +44,7 @@ La correcta queda guardada solo en el aparato que lanzó la pregunta; si revelas
 
 **Mejor disfraz:** 1) nominación: cada uno elige a alguien de su equipo. 2) cierras y queda el más votado por equipo.
 3) votación: cada persona ordena los 3 disfraces de los otros equipos en dificultad, calidad y referencia.
-4) resultados: 1º = 3 pts, 2º = 2, 3º = 1, promediado y sumado en las 3 categorías. Los puntos de la tabla los sumas tú.
+4) resultados: 1º = 3 pts, 2º = 2, 3º = 1, sumado en las 3 categorías. Se promedia primero dentro de cada equipo que vota y después entre equipos, así cada equipo pesa lo mismo aunque tenga más gente. Los puntos de la tabla los sumas tú.
 
 **Beerpong y caballos:** solo registras resultados; los puntos se suman en "Puntajes".
 
