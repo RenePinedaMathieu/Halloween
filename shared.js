@@ -22,7 +22,7 @@ const TEAMS = {
   4: { name: "Equipo 4", color: "#e0544b" },
 };
 const GAMES = {
-  beerpong: "Beerpong", trivia: "Trivia", cancion: "Canción",
+  beerpong: "Beerpong", cancion: "Canción",
   disfraz: "Disfraz", caballos: "Caballos", extra: "Extra",
 };
 const CATEGORIES = ["dificultad", "calidad", "referencia"];

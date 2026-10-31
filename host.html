@@ -170,7 +170,6 @@ function render() {
     <div class="card" id="p-mic"></div>
     <div class="grid-host">
       <div class="card" id="p-song"></div>
-      <div class="card" id="p-trivia"></div>
       <div class="card" id="p-costume"></div>
       <div class="card" id="p-scores"></div>
       <div class="card" id="p-beer"></div>
@@ -189,7 +188,7 @@ function render() {
     rb.disabled = true; rb.textContent = "Borrando…";
     await resetAll();
   };
-  renderMic(); renderSong(); renderTrivia(); renderCostume(); renderScores(); renderBeer(); renderHorse();
+  renderMic(); renderSong(); renderCostume(); renderScores(); renderBeer(); renderHorse();
 }
 
 // ============ Spotify (PKCE, sin servidor) ============

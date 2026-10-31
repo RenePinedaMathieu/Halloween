@@ -34,7 +34,8 @@ Si te equivocas, usa "Corregir".
 
 **Agregar canciones:** en el panel, busca por nombre o artista y toca "+ Cola". Suena después de la actual. "Siguiente canción" del juego también avanza la cola, así que arma la cola pensando en el juego.
 
-**Trivia (estilo Kahoot):** escribe la pregunta y las alternativas, marca la correcta con el círculo, elige el tiempo (y si vale doble) y lánzala.
+**Trivia (estilo Kahoot):** *Sacada de la app el 31/10: ya no aparece en los celulares, el panel ni la tabla. El código sigue ahí por si se quiere volver a usar.*
+ escribe la pregunta y las alternativas, marca la correcta con el círculo, elige el tiempo (y si vale doble) y lánzala.
 Cada persona responde en su celular, una sola vez: acertar vale de 1000 (al instante) a 500 (al último segundo); fallar o no responder, 0.
 Cuando se acaba el tiempo (más 2 s de gracia) se revela sola, o antes con "Revelar ahora". Los celulares muestran si acertaste, tus puntos y la tabla de equipos y jugadores.
 El puntaje del equipo es el **promedio por jugador**: la suma del equipo dividida por cuántos de ellos han respondido alguna pregunta, así no gana el equipo con más gente.

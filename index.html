@@ -123,7 +123,7 @@ function render() {
       <div class="who"><span class="eyebrow">Halloween · ${TEAMS[t].name}</span><strong>${esc(S.me.name)}</strong></div>
       ${teamChip(t)}
     </div>
-    <nav class="tabs5">
+    <nav class="tabsbar">
       ${TABS.map(([k, l]) => `<button class="${S.tab === k ? "sel" : ""}" data-tab="${k}">${l}${S.live.game === k ? '<i class="live"></i>' : ""}</button>`).join("")}
     </nav>
     <div id="body"></div>
@@ -145,9 +145,9 @@ function render() {
   if (f && f.tagName === "INPUT" && !f.disabled) { f.focus(); try { f.setSelectionRange(selPos, selPos); } catch {} }
 }
 
-const TABS = [["cancion", "Canción"], ["trivia", "Trivia"], ["disfraz", "Disfraz"], ["resultados", "Tabla"], ["equipo", "Equipo"]];
+const TABS = [["cancion", "Canción"], ["disfraz", "Disfraz"], ["resultados", "Tabla"], ["equipo", "Equipo"]];
 // Pestaña que corresponde al juego en vivo
-function tabForGame(g) { return ["cancion", "trivia", "disfraz"].includes(g) ? g : "resultados"; }
+function tabForGame(g) { return ["cancion", "disfraz"].includes(g) ? g : "resultados"; }
 
 function renderPicker() {
   const list = S.players.filter((p) => normalizeSong(p.name).includes(normalizeSong(S.search)));
@@ -212,7 +212,6 @@ function renderResults() {
     <div class="card"><span class="eyebrow">General</span><h2>Tabla de puntajes</h2>${renderScoreboard(S.scores)}</div>
     <div class="card"><h3>Beerpong</h3>${beer.length ? `<ul class="list">${beer.map((m) => `<li><span>${esc(m.data.stage)}</span><span>${teamChip(m.data.a)} vs ${teamChip(m.data.b)}</span><span class="small">gana ${teamChip(m.data.winner)}</span></li>`).join("")}</ul>` : `<p class="muted small">Aún no hay partidos.</p>`}</div>
     <div class="card"><h3>Adivina la canción</h3>${songHistory()}</div>
-    <div class="card"><span class="eyebrow">Trivia</span>${renderTriviaBoard(triviaStandings(S.matches), S.me.name, 5)}</div>
     <div class="card"><h3>Mejor disfraz</h3>${cost ? costumeTable(cost.data.results, cost.data.candidates) : `<p class="muted small">Todavía no se vota.</p>`}</div>
     <div class="card"><h3>Carrera de caballos</h3>${horse.length ? `<ul class="list">${horse.map((m, i) => `<li><span>Carrera ${i + 1}</span><span>${m.data.order.map((t, j) => `${j + 1}º ${teamChip(t)}`).join(" ")}</span></li>`).join("")}</ul>` : `<p class="muted small">Aún no hay carreras.</p>`}</div>`;
 }
